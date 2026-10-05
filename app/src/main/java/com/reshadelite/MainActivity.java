@@ -95,7 +95,23 @@ public class MainActivity extends Activity {
         root.addView(slider("Hangat / Dingin", "warmth", -100, 100, 0));
         root.addView(slider("Kekuatan warna tint", "tint", 0, 100, 0));
         root.addView(slider("Vignette", "vignette", 0, 100, 0));
+Button accBtn = new Button(this);
+        accBtn.setText("1) Aktifkan layanan Game Pad (Aksesibilitas)");
+        accBtn.setAllCaps(false);
+        accBtn.setOnClickListener(v -> startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)));
+        root.addView(accBtn);
 
+        Switch padSw = new Switch(this);
+        padSw.setText("2) Tampilkan game pad");
+        padSw.setTextColor(Color.WHITE);
+        padSw.setChecked(prefs.getBoolean("pad", true));
+        padSw.setOnCheckedChangeListener((v, on) -> prefs.edit().putBoolean("pad", on).apply());
+        root.addView(padSw);
+
+        root.addView(slider("Joystick game - X (%)", "jx", 0, 100, 15));
+        root.addView(slider("Joystick game - Y (%)", "jy", 0, 100, 70));
+        root.addView(slider("Tombol E di game - X (%)", "ex", 0, 100, 85));
+        root.addView(slider("Tombol E di game - Y (%)", "ey", 0, 100, 60));
         root.addView(text("Warna tint", 16, Color.WHITE));
         LinearLayout colors = new LinearLayout(this);
         int[] swatches = {0xFFFF5078, 0xFFFF9800, 0xFFFFEB3B, 0xFF4CAF50,
