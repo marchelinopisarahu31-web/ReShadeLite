@@ -551,9 +551,25 @@ public class GameService extends AccessibilityService
                 .addStroke(new GestureDescription.StrokeDescription(p, 0, 50))
                 .build(), null, null);
     }
-
     // ---------- util ----------
+@Override
+    public void onConfigurationChanged(android.content.res.Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        ui.postDelayed(this::resetPositions, 400);
+    }
 
+    private void resetPositions() {
+        if (wm == null || panel == null || cursor == null) return;
+        int[] s = screen();
+        panelLp.x = Math.max(0, s[0] / 2 - dp(160));
+        panelLp.y = Math.max(0, s[1] - dp(200));
+        wm.updateViewLayout(panel, panelLp);
+        cx = s[0] / 2f;
+        cy = s[1] / 2f;
+        cursorLp.x = (int) (cx - cursorSize / 2f);
+        cursorLp.y = (int) (cy - cursorSize / 2f);
+        wm.updateViewLayout(cursor, cursorLp);
+    }
     private int[] screen() {
         DisplayMetrics m = new DisplayMetrics();
         wm.getDefaultDisplay().getRealMetrics(m);
