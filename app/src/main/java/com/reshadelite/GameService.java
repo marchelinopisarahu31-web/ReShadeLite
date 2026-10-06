@@ -3,9 +3,12 @@ package com.reshadelite;
 import android.accessibilityservice.AccessibilityService;
 import android.accessibilityservice.GestureDescription;
 import android.content.SharedPreferences;
+import android.content.res.Configuration;
+import android.graphics.Canvas;
 import android.graphics.Color;
-import android.graphics.Path;
+import android.graphics.Paint;
 import android.graphics.PixelFormat;
+import android.graphics.Path;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Handler;
 import android.os.Looper;
@@ -15,22 +18,22 @@ import android.view.MotionEvent;
 import android.view.View;
 import android.view.WindowManager;
 import android.view.accessibility.AccessibilityEvent;
+import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Map;
-import java.util.Set;
 
+/** Game pad: joystick (WASD), letter keys that tap a spot, touchpad + cursor. */
 public class GameService extends AccessibilityService
         implements SharedPreferences.OnSharedPreferenceChangeListener {
 
-    private static final String[] ROWS = {"QWERTYUIOP", "ASDFGHJKL", "ZXCVBNM", "1234567890"};
-    private static final String ORDER = "QWERTYUIOPASDFGHJKLZXCVBNM1234567890";
-    private static final String HAND = "\uD83D\uDD90";
-    private static final String JOYSTICK = "\uD83D\uDD79";
+    private static final String HAND = "🖐";
+    private static final String JOY = "🕹";
 
     private WindowManager wm;
     private SharedPreferences prefs;
@@ -38,582 +41,254 @@ public class GameService extends AccessibilityService
 
     private LinearLayout panel;
     private LinearLayout keysBox;
-    private TextView editBtn;
+    private Button editBtn;
     private WindowManager.LayoutParams panelLp;
     private View cursor;
     private WindowManager.LayoutParams cursorLp;
-    private View picker;
+    private LinearLayout picker;
     private final Map<String, View> markers = new HashMap<>();
     private int cursorSize;
     private float cx, cy;
-    private boolean editMode;
+    private boolean editMode = false;
 
-    private boolean kw, ka, ks, kd;
-    private boolean active;
-    private float tx, ty;
-    private GestureDescription.StrokeDescription stroke;
-    private float lastX, lastY;
-    private boolean inFlight;
+    // joystick state
+    private boolean active = false;
+    private float vx = 0, vy = 0;
+    private float tx, ty, lastX, lastY;
+    private GestureDescription.StrokeDescription stroke = null;
+    private boolean inFlight = false;
+    private int gen = 0;
+
+    // ---------------------------------------------------------------- lifecycle
 
     @Override
     protected void onServiceConnected() {
         super.onServiceConnected();
         wm = (WindowManager) getSystemService(WINDOW_SERVICE);
         prefs = getSharedPreferences(OverlayService.PREFS, MODE_PRIVATE);
-        cursorSize = dp(28);
-        int[] s = screen();
-        cx = s[0] / 2f;
-        cy = s[1] / 2f;
+        prefs.registerOnSharedPreferenceChangeListener(this);
+        cursorSize = dp(22);
         buildCursor();
         buildPanel();
-        prefs.registerOnSharedPreferenceChangeListener(this);
         applyVisibility();
     }
 
-    // ---------- window helpers ----------
+    @Override public void onAccessibilityEvent(AccessibilityEvent e) { }
+    @Override public void onInterrupt() { }
+
+    @Override
+    public void onConfigurationChanged(Configuration c) {
+        super.onConfigurationChanged(c);
+        ui.postDelayed(this::resetPositions, 400);
+    }
+
+    private void resetPositions() {
+        if (wm == null || panel == null) return;
+        int[] s = screen();
+        panelLp.x = Math.max(0, Math.min(panelLp.x, s[0] - dp(120)));
+        panelLp.y = Math.max(0, Math.min(panelLp.y, s[1] - dp(120)));
+        if (panel.isAttachedToWindow()) wm.updateViewLayout(panel, panelLp);
+        cx = s[0] / 2f;
+        cy = s[1] / 2f;
+        moveCursor(cx, cy);
+        if (editMode) { hideMarkers(); showMarkers(); }
+    }
+
+    @Override
+    public void onSharedPreferenceChanged(SharedPreferences p, String key) {
+        if ("pad".equals(key)) {
+            applyVisibility();
+            ui.postDelayed(this::resetPositions, 200);
+        }
+    }
+
+    @Override
+    public void onDestroy() {
+        if (prefs != null) prefs.unregisterOnSharedPreferenceChangeListener(this);
+        hideMarkers();
+        removeView(picker);
+        removeView(panel);
+        removeView(cursor);
+        super.onDestroy();
+    }
+
+    // ---------------------------------------------------------------- windows
 
     private WindowManager.LayoutParams lp(boolean touchable) {
         int flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-                | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
-                | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
-                | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL;
+                | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS;
         if (!touchable) flags |= WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
-        WindowManager.LayoutParams p = new WindowManager.LayoutParams(
+        WindowManager.LayoutParams l = new WindowManager.LayoutParams(
                 WindowManager.LayoutParams.WRAP_CONTENT,
                 WindowManager.LayoutParams.WRAP_CONTENT,
                 WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
                 flags, PixelFormat.TRANSLUCENT);
-        p.gravity = Gravity.TOP | Gravity.START;
-        return p;
-    }
-
-    private WindowManager.LayoutParams lpFull() {
-        WindowManager.LayoutParams p = new WindowManager.LayoutParams(
-                WindowManager.LayoutParams.MATCH_PARENT,
-                WindowManager.LayoutParams.MATCH_PARENT,
-                WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
-                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-                        | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
-                        | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
-                PixelFormat.TRANSLUCENT);
-        p.gravity = Gravity.TOP | Gravity.START;
-        return p;
+        l.gravity = Gravity.TOP | Gravity.START;
+        return l;
     }
 
     private void removeView(View v) {
-        if (v == null) return;
-        try { wm.removeView(v); } catch (Exception ignored) { }
+        if (v == null || wm == null) return;
+        try { if (v.isAttachedToWindow()) wm.removeView(v); } catch (Exception ignored) { }
     }
 
-    private GradientDrawable rounded(int color) {
+    private GradientDrawable rounded(int color, int radiusDp) {
         GradientDrawable g = new GradientDrawable();
-        g.setCornerRadius(dp(8));
         g.setColor(color);
+        g.setCornerRadius(dp(radiusDp));
         return g;
     }
 
-    private TextView headBtn(String s) {
-        TextView t = new TextView(this);
-        t.setText(s);
-        t.setTextColor(Color.WHITE);
-        t.setTextSize(16);
-        t.setGravity(Gravity.CENTER);
-        t.setPadding(dp(10), 0, dp(10), 0);
-        return t;
+    private int dp(int v) {
+        return Math.round(v * getResources().getDisplayMetrics().density);
     }
 
-    // ---------- cursor ----------
+    private int[] screen() {
+        DisplayMetrics m = new DisplayMetrics();
+        wm.getDefaultDisplay().getRealMetrics(m);
+        return new int[]{m.widthPixels, m.heightPixels};
+    }
+
+    // ---------------------------------------------------------------- cursor
 
     private void buildCursor() {
         cursor = new View(this);
-        GradientDrawable gd = new GradientDrawable();
-        gd.setShape(GradientDrawable.OVAL);
-        gd.setColor(0x55FF0000);
-        gd.setStroke(dp(2), Color.WHITE);
-        cursor.setBackground(gd);
+        GradientDrawable g = new GradientDrawable();
+        g.setShape(GradientDrawable.OVAL);
+        g.setColor(Color.argb(190, 255, 0, 0));
+        g.setStroke(dp(2), Color.WHITE);
+        cursor.setBackground(g);
         cursorLp = lp(false);
         cursorLp.width = cursorSize;
         cursorLp.height = cursorSize;
-        cursorLp.x = (int) (cx - cursorSize / 2f);
-        cursorLp.y = (int) (cy - cursorSize / 2f);
-        wm.addView(cursor, cursorLp);
-    }
-
-    private void moveCursor(float dx, float dy) {
         int[] s = screen();
-        cx = Math.max(0, Math.min(s[0], cx + dx));
-        cy = Math.max(0, Math.min(s[1], cy + dy));
-        cursorLp.x = (int) (cx - cursorSize / 2f);
-        cursorLp.y = (int) (cy - cursorSize / 2f);
-        wm.updateViewLayout(cursor, cursorLp);
+        cx = s[0] / 2f;
+        cy = s[1] / 2f;
+        cursorLp.x = (int) cx - cursorSize / 2;
+        cursorLp.y = (int) cy - cursorSize / 2;
     }
 
-    // ---------- panel ----------
+    private void moveCursor(float x, float y) {
+        int[] s = screen();
+        cx = Math.max(0, Math.min(s[0] - 1, x));
+        cy = Math.max(0, Math.min(s[1] - 1, y));
+        cursorLp.x = (int) cx - cursorSize / 2;
+        cursorLp.y = (int) cy - cursorSize / 2;
+        if (cursor.isAttachedToWindow()) wm.updateViewLayout(cursor, cursorLp);
+    }
 
-    private void buildPanel() {
-        panel = new LinearLayout(this);
-        panel.setOrientation(LinearLayout.VERTICAL);
-        panel.setPadding(dp(6), dp(4), dp(6), dp(6));
-        panel.setBackground(rounded(0xAA000000));
+    // ---------------------------------------------------------------- joystick widget
 
-        LinearLayout head = new LinearLayout(this);
-        TextView handle = headBtn("\u2261 geser");
-        handle.setTextSize(11);
-        handle.setOnTouchListener(new View.OnTouchListener() {
-            float dx, dy;
-            int sx, sy;
-            @Override
-            public boolean onTouch(View v, MotionEvent e) {
-                switch (e.getActionMasked()) {
-                    case MotionEvent.ACTION_DOWN:
-                        dx = e.getRawX();
-                        dy = e.getRawY();
-                        sx = panelLp.x;
-                        sy = panelLp.y;
-                        return true;
-                    case MotionEvent.ACTION_MOVE:
-                        panelLp.x = sx + (int) (e.getRawX() - dx);
-                        panelLp.y = sy + (int) (e.getRawY() - dy);
-                        wm.updateViewLayout(panel, panelLp);
-                        return true;
-                }
+    /** Round pad you drag with your thumb. Reports direction in -1..1. */
+    private class JoyPad extends View {
+        private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private float tx0 = 0, ty0 = 0; // thumb offset, -1..1
+
+        JoyPad() { super(GameService.this); }
+
+        @Override
+        protected void onDraw(Canvas c) {
+            float w = getWidth(), h = getHeight(), r = Math.min(w, h) / 2f;
+            p.setStyle(Paint.Style.FILL);
+            p.setColor(Color.argb(120, 255, 255, 255));
+            c.drawCircle(w / 2, h / 2, r - dp(2), p);
+            p.setStyle(Paint.Style.STROKE);
+            p.setStrokeWidth(dp(2));
+            p.setColor(Color.argb(200, 255, 255, 255));
+            c.drawCircle(w / 2, h / 2, r - dp(2), p);
+            p.setStyle(Paint.Style.FILL);
+            p.setColor(Color.argb(230, 255, 120, 0));
+            float thumbR = r * 0.38f;
+            c.drawCircle(w / 2 + tx0 * (r - thumbR), h / 2 + ty0 * (r - thumbR), thumbR, p);
+        }
+
+        @Override
+        public boolean onTouchEvent(MotionEvent e) {
+            int a = e.getActionMasked();
+            if (a == MotionEvent.ACTION_UP || a == MotionEvent.ACTION_CANCEL) {
+                tx0 = 0; ty0 = 0;
+                invalidate();
+                setJoy(0, 0);
                 return true;
             }
-        });
-        head.addView(handle, new LinearLayout.LayoutParams(0, dp(24), 1f));
-
-        TextView pickBtn = headBtn("\u2699");
-        pickBtn.setOnClickListener(v -> showPicker());
-        head.addView(pickBtn, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT, dp(24)));
-
-        editBtn = headBtn("\u270E");
-        editBtn.setOnClickListener(v -> toggleEdit());
-        head.addView(editBtn, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT, dp(24)));
-        panel.addView(head);
-
-        LinearLayout body = new LinearLayout(this);
-        body.setOrientation(LinearLayout.HORIZONTAL);
-
-        keysBox = new LinearLayout(this);
-        keysBox.setOrientation(LinearLayout.VERTICAL);
-        body.addView(keysBox);
-
-        TextView pad = new TextView(this);
-        pad.setText("touchpad\n(ketuk = klik)");
-        pad.setTextColor(0xCCFFFFFF);
-        pad.setTextSize(11);
-        pad.setGravity(Gravity.CENTER);
-        pad.setBackground(rounded(0x55FFFFFF));
-        pad.setOnTouchListener(new View.OnTouchListener() {
-            float lx, ly, sx, sy;
-            long t0;
-            boolean moved;
-            @Override
-            public boolean onTouch(View v, MotionEvent e) {
-                switch (e.getActionMasked()) {
-                    case MotionEvent.ACTION_DOWN:
-                        lx = sx = e.getRawX();
-                        ly = sy = e.getRawY();
-                        t0 = e.getEventTime();
-                        moved = false;
-                        return true;
-                    case MotionEvent.ACTION_MOVE:
-                        moveCursor((e.getRawX() - lx) * 2.5f, (e.getRawY() - ly) * 2.5f);
-                        lx = e.getRawX();
-                        ly = e.getRawY();
-                        if (Math.hypot(e.getRawX() - sx, e.getRawY() - sy) > dp(10)) moved = true;
-                        return true;
-                    case MotionEvent.ACTION_UP:
-                        if (!moved && e.getEventTime() - t0 < 250) tapAt(cx, cy);
-                        return true;
-                }
-                return true;
-            }
-        });
-        LinearLayout.LayoutParams plp = new LinearLayout.LayoutParams(dp(110), dp(84));
-        plp.setMargins(dp(8), dp(2), 0, 0);
-        body.addView(pad, plp);
-        panel.addView(body);
-
-        panelLp = lp(true);
-        int[] s = screen();
-        panelLp.x = s[0] / 2 - dp(160);
-        panelLp.y = s[1] - dp(200);
-        wm.addView(panel, panelLp);
-
-        rebuildKeys();
-    }
-
-    private void rebuildKeys() {
-        keysBox.removeAllViews();
-        Set<String> sel = selected();
-        LinearLayout row = null;
-        int n = 0;
-        for (char c : ORDER.toCharArray()) {
-            String k = String.valueOf(c);
-            if (!sel.contains(k)) continue;
-            if (n % 5 == 0) {
-                row = new LinearLayout(this);
-                keysBox.addView(row);
-            }
-            row.addView(key(k));
-            n++;
-        }
-        if (n == 0) {
-            TextView t = new TextView(this);
-            t.setText("Tekan \u2699 untuk\npilih huruf");
-            t.setTextColor(Color.WHITE);
-            t.setTextSize(12);
-            keysBox.addView(t);
-        }
-    }
-
-    private boolean isSet(String k) {
-        return isMove(k) || prefs.contains("kx_" + k);
-    }
-
-    private TextView key(final String k) {
-        final TextView t = new TextView(this);
-        boolean set = isSet(k);
-        String label = k;
-        if (k.equals("E")) label = set ? "E\n" + HAND : "E\n?";
-        else if (!set) label = k + "\n?";
-        t.setText(label);
-        t.setTextColor(Color.WHITE);
-        t.setTextSize(set && !k.equals("E") ? 17 : 13);
-        t.setGravity(Gravity.CENTER);
-        t.setBackground(rounded(editMode ? 0xFF8D5A00 : 0xAA444444));
-        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(dp(40), dp(44));
-        p.setMargins(dp(1), dp(1), dp(1), dp(1));
-        t.setLayoutParams(p);
-        t.setOnTouchListener((v, e) -> {
-            switch (e.getActionMasked()) {
-                case MotionEvent.ACTION_DOWN:
-                    if (editMode) {
-                        Toast.makeText(this, "Seret penanda bulat di layar ke tombol game",
-                                Toast.LENGTH_SHORT).show();
-                        return true;
-                    }
-                    t.setAlpha(0.5f);
-                    press(k, true);
-                    return true;
-                case MotionEvent.ACTION_UP:
-                case MotionEvent.ACTION_CANCEL:
-                    t.setAlpha(1f);
-                    if (!editMode) press(k, false);
-                    return true;
+            if (a == MotionEvent.ACTION_DOWN || a == MotionEvent.ACTION_MOVE) {
+                float w = getWidth(), h = getHeight(), r = Math.min(w, h) / 2f;
+                float dx = (e.getX() - w / 2f) / r;
+                float dy = (e.getY() - h / 2f) / r;
+                float len = (float) Math.hypot(dx, dy);
+                if (len > 1f) { dx /= len; dy /= len; }
+                tx0 = dx; ty0 = dy;
+                invalidate();
+                setJoy(dx, dy);
             }
             return true;
-        });
-        return t;
+        }
     }
 
-    private void toggleEdit() {
-        editMode = !editMode;
-        editBtn.setTextColor(editMode ? 0xFFFFA000 : Color.WHITE);
-        if (editMode) {
-            showMarkers();
-            Toast.makeText(this, "Seret penanda ke tombol di game. Oranye = belum diatur, "
-                    + "hijau = sudah. Tekan \u270E lagi kalau selesai.", Toast.LENGTH_LONG).show();
+    private void setJoy(float x, float y) {
+        vx = x;
+        vy = y;
+        float mag = (float) Math.hypot(x, y);
+        if (mag < 0.2f) {
+            active = false;
         } else {
-            hideMarkers();
+            int[] s = screen();
+            float r = Math.min(s[0], s[1]) * 0.10f;
+            tx = joyX() + x * r;
+            ty = joyY() + y * r;
+            active = true;
         }
-        rebuildKeys();
-    }
-
-    private void applyVisibility() {
-        int vis = prefs.getBoolean("pad", true) ? View.VISIBLE : View.GONE;
-        if (panel != null) panel.setVisibility(vis);
-        if (cursor != null) cursor.setVisibility(vis);
-    }
-
-    // ---------- penanda yang bisa diseret ----------
-
-    private void hideMarkers() {
-        for (View v : markers.values()) removeView(v);
-        markers.clear();
-    }
-
-    private void showMarkers() {
-        hideMarkers();
-        Set<String> sel = selected();
-        boolean hasMove = false;
-        int i = 0;
-        for (char c : ORDER.toCharArray()) {
-            String k = String.valueOf(c);
-            if (!sel.contains(k)) continue;
-            if (isMove(k)) {
-                hasMove = true;
-                continue;
-            }
-            addMarker(k, i++);
-        }
-        if (hasMove) addMarker("JOY", i);
-    }
-
-    private void markerBg(View v, boolean set) {
-        GradientDrawable g = new GradientDrawable();
-        g.setShape(GradientDrawable.OVAL);
-        g.setColor(set ? 0xCC2E7D32 : 0xCCE65100);
-        g.setStroke(dp(2), Color.WHITE);
-        v.setBackground(g);
-    }
-
-    private void addMarker(final String id, int index) {
-        final int size = dp(52);
-        int[] s = screen();
-        boolean set;
-        float px, py;
-        if (id.equals("JOY")) {
-            px = joyX();
-            py = joyY();
-            set = prefs.contains("jx");
-        } else if (prefs.contains("kx_" + id)) {
-            px = s[0] * prefs.getInt("kx_" + id, 0) / 1000f;
-            py = s[1] * prefs.getInt("ky_" + id, 0) / 1000f;
-            set = true;
-        } else {
-            px = Math.min(s[0] - size, dp(40) + index * dp(62));
-            py = dp(90);
-            set = false;
-        }
-
-        String label;
-        if (id.equals("JOY")) label = JOYSTICK + "\nJoy";
-        else if (id.equals("E")) label = HAND + "\nE";
-        else label = id;
-
-        final TextView t = new TextView(this);
-        t.setText(label);
-        t.setTextColor(Color.WHITE);
-        t.setTextSize(15);
-        t.setGravity(Gravity.CENTER);
-        markerBg(t, set);
-
-        final WindowManager.LayoutParams p = lp(true);
-        p.width = size;
-        p.height = size;
-        p.x = (int) (px - size / 2f);
-        p.y = (int) (py - size / 2f);
-
-        t.setOnTouchListener(new View.OnTouchListener() {
-            float dx, dy;
-            int sx, sy;
-            @Override
-            public boolean onTouch(View v, MotionEvent e) {
-                switch (e.getActionMasked()) {
-                    case MotionEvent.ACTION_DOWN:
-                        dx = e.getRawX();
-                        dy = e.getRawY();
-                        sx = p.x;
-                        sy = p.y;
-                        return true;
-                    case MotionEvent.ACTION_MOVE:
-                        p.x = sx + (int) (e.getRawX() - dx);
-                        p.y = sy + (int) (e.getRawY() - dy);
-                        wm.updateViewLayout(t, p);
-                        return true;
-                    case MotionEvent.ACTION_UP:
-                        saveMarker(id, p.x + size / 2f, p.y + size / 2f);
-                        markerBg(t, true);
-                        return true;
-                }
-                return true;
-            }
-        });
-        markers.put(id, t);
-        wm.addView(t, p);
-    }
-
-    private void saveMarker(String id, float x, float y) {
-        int[] s = screen();
-        if (id.equals("JOY")) {
-            prefs.edit()
-                    .putInt("jx", Math.round(x * 100f / s[0]))
-                    .putInt("jy", Math.round(y * 100f / s[1]))
-                    .apply();
-            Toast.makeText(this, "Titik joystick tersimpan", Toast.LENGTH_SHORT).show();
-        } else {
-            prefs.edit()
-                    .putInt("kx_" + id, Math.round(x * 1000f / s[0]))
-                    .putInt("ky_" + id, Math.round(y * 1000f / s[1]))
-                    .apply();
-            Toast.makeText(this, "Titik " + id + " tersimpan", Toast.LENGTH_SHORT).show();
-        }
-        rebuildKeys();
-    }
-
-    // ---------- pilih huruf ----------
-
-    private Set<String> selected() {
-        String s = prefs.getString("keys", "W,A,S,D,E");
-        Set<String> out = new LinkedHashSet<>();
-        for (String k : s.split(",")) if (!k.isEmpty()) out.add(k);
-        return out;
-    }
-
-    private void saveSelected(Set<String> set) {
-        StringBuilder b = new StringBuilder();
-        for (String k : set) {
-            if (b.length() > 0) b.append(',');
-            b.append(k);
-        }
-        prefs.edit().putString("keys", b.toString()).apply();
-    }
-
-    private void showPicker() {
-        removeView(picker);
-        final Set<String> sel = new LinkedHashSet<>(selected());
-
-        LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
-        root.setGravity(Gravity.CENTER);
-        root.setBackgroundColor(0xEE000000);
-        root.setPadding(dp(8), dp(8), dp(8), dp(8));
-
-        TextView title = new TextView(this);
-        title.setText("Pilih huruf yang mau dipakai (hijau = dipakai)");
-        title.setTextColor(Color.WHITE);
-        title.setTextSize(15);
-        title.setGravity(Gravity.CENTER);
-        title.setPadding(0, 0, 0, dp(12));
-        root.addView(title);
-
-        for (String r : ROWS) {
-            LinearLayout row = new LinearLayout(this);
-            row.setGravity(Gravity.CENTER);
-            for (char c : r.toCharArray()) {
-                final String k = String.valueOf(c);
-                final TextView b = new TextView(this);
-                b.setText(k);
-                b.setTextColor(Color.WHITE);
-                b.setTextSize(18);
-                b.setGravity(Gravity.CENTER);
-                b.setBackground(rounded(sel.contains(k) ? 0xFF2E7D32 : 0xFF444444));
-                LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(0, dp(46), 1f);
-                p.setMargins(dp(2), dp(2), dp(2), dp(2));
-                b.setOnClickListener(v -> {
-                    if (sel.contains(k)) sel.remove(k); else sel.add(k);
-                    b.setBackground(rounded(sel.contains(k) ? 0xFF2E7D32 : 0xFF444444));
-                });
-                row.addView(b, p);
-            }
-            root.addView(row, new LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT,
-                    LinearLayout.LayoutParams.WRAP_CONTENT));
-        }
-
-        TextView done = new TextView(this);
-        done.setText("SELESAI");
-        done.setTextColor(Color.WHITE);
-        done.setTextSize(16);
-        done.setGravity(Gravity.CENTER);
-        done.setBackground(rounded(0xFF1565C0));
-        done.setOnClickListener(v -> {
-            saveSelected(sel);
-            removeView(picker);
-            picker = null;
-            rebuildKeys();
-            if (editMode) showMarkers();
-        });
-        LinearLayout.LayoutParams dp2 = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, dp(48));
-        dp2.setMargins(dp(24), dp(16), dp(24), 0);
-        root.addView(done, dp2);
-
-        picker = root;
-        wm.addView(root, lpFull());
-    }
-
-    // ---------- input ke game ----------
-
-    private boolean isMove(String k) {
-        return k.equals("W") || k.equals("A") || k.equals("S") || k.equals("D");
-    }
-
-    private void press(String k, boolean down) {
-        switch (k) {
-            case "W": kw = down; break;
-            case "A": ka = down; break;
-            case "S": ks = down; break;
-            case "D": kd = down; break;
-            default:
-                if (down) tapKey(k);
-                return;
-        }
-        updateTarget();
         pump();
-    }
-
-    private void tapKey(String k) {
-        int[] s = screen();
-        if (prefs.contains("kx_" + k)) {
-            tapAt(s[0] * prefs.getInt("kx_" + k, 0) / 1000f,
-                    s[1] * prefs.getInt("ky_" + k, 0) / 1000f);
-        } else {
-            Toast.makeText(this, k + " belum diatur. Tekan \u270E lalu seret penandanya ke tombol game.",
-                    Toast.LENGTH_SHORT).show();
-        }
     }
 
     private float joyX() { return screen()[0] * prefs.getInt("jx", 15) / 100f; }
     private float joyY() { return screen()[1] * prefs.getInt("jy", 70) / 100f; }
 
-    private void updateTarget() {
-        int dx = (kd ? 1 : 0) - (ka ? 1 : 0);
-        int dy = (ks ? 1 : 0) - (kw ? 1 : 0);
-        if (dx == 0 && dy == 0) {
-            active = false;
-            return;
-        }
-        int[] s = screen();
-        float r = Math.min(s[0], s[1]) * 0.10f;
-        double len = Math.hypot(dx, dy);
-        tx = (float) (joyX() + dx / len * r);
-        ty = (float) (joyY() + dy / len * r);
-        active = true;
-    }
+    // ---------------------------------------------------------------- gestures
 
     private void pump() {
         if (inFlight) return;
         Path p = new Path();
-        GestureDescription.StrokeDescription next;
         if (active) {
+            GestureDescription.StrokeDescription sd;
             if (stroke == null) {
                 p.moveTo(joyX(), joyY());
                 p.lineTo(tx, ty);
-                next = new GestureDescription.StrokeDescription(p, 0, 80, true);
+                sd = new GestureDescription.StrokeDescription(p, 0, 120, true);
             } else {
                 p.moveTo(lastX, lastY);
                 p.lineTo(tx, ty);
-                next = stroke.continueStroke(p, 0, 80, true);
+                sd = stroke.continueStroke(p, 0, 120, true);
             }
-            lastX = tx;
-            lastY = ty;
-            stroke = next;
+            send(sd, tx, ty, true);
         } else if (stroke != null) {
             p.moveTo(lastX, lastY);
-            next = stroke.continueStroke(p, 0, 20, false);
-        } else {
-            return;
+            send(stroke.continueStroke(p, 0, 50, false), lastX, lastY, false);
         }
-        final boolean end = !active;
-        GestureDescription g = new GestureDescription.Builder().addStroke(next).build();
+    }
+
+    private void send(GestureDescription.StrokeDescription sd, float x, float y,
+                      final boolean willContinue) {
+        final int my = ++gen;
+        stroke = willContinue ? sd : stroke;
         inFlight = true;
-        boolean ok = dispatchGesture(g, new GestureResultCallback() {
-            @Override public void onCompleted(GestureDescription d) {
-                inFlight = false;
-                if (end) stroke = null;
-                pump();
-            }
-            @Override public void onCancelled(GestureDescription d) {
-                inFlight = false;
-                stroke = null;
-                pump();
-            }
-        }, ui);
+        lastX = x;
+        lastY = y;
+        boolean ok = dispatchGesture(new GestureDescription.Builder().addStroke(sd).build(),
+                new GestureResultCallback() {
+                    @Override public void onCompleted(GestureDescription g) {
+                        if (my != gen) return;
+                        inFlight = false;
+                        if (!willContinue) stroke = null;
+                        pump();
+                    }
+                    @Override public void onCancelled(GestureDescription g) {
+                        if (my != gen) return;
+                        inFlight = false;
+                        stroke = null;
+                        pump();
+                    }
+                }, ui);
         if (!ok) {
             inFlight = false;
             stroke = null;
@@ -623,63 +298,347 @@ public class GameService extends AccessibilityService
     private void tapAt(float x, float y) {
         Path p = new Path();
         p.moveTo(x, y);
-        dispatchGesture(new GestureDescription.Builder()
-                .addStroke(new GestureDescription.StrokeDescription(p, 0, 50))
-                .build(), null, null);
+        final int my = ++gen;
+        stroke = null;
+        inFlight = true;
+        boolean ok = dispatchGesture(new GestureDescription.Builder()
+                .addStroke(new GestureDescription.StrokeDescription(p, 0, 50)).build(),
+                new GestureResultCallback() {
+                    @Override public void onCompleted(GestureDescription g) {
+                        if (my != gen) return;
+                        inFlight = false;
+                        pump();
+                    }
+                    @Override public void onCancelled(GestureDescription g) {
+                        if (my != gen) return;
+                        inFlight = false;
+                        pump();
+                    }
+                }, ui);
+        if (!ok) inFlight = false;
     }
 
-    // ---------- rotasi layar ----------
+    // ---------------------------------------------------------------- panel
 
-    @Override
-    public void onConfigurationChanged(android.content.res.Configuration newConfig) {
-        super.onConfigurationChanged(newConfig);
-        ui.postDelayed(this::resetPositions, 400);
+    private Button headBtn(String label) {
+        Button b = new Button(this);
+        b.setText(label);
+        b.setAllCaps(false);
+        b.setTextColor(Color.WHITE);
+        b.setTextSize(13);
+        b.setMinWidth(0);
+        b.setMinHeight(0);
+        b.setMinimumWidth(0);
+        b.setMinimumHeight(0);
+        b.setPadding(dp(10), dp(4), dp(10), dp(4));
+        b.setBackground(rounded(Color.argb(200, 60, 60, 70), 8));
+        return b;
     }
 
-    private void resetPositions() {
-        if (wm == null || panel == null || cursor == null) return;
+    private void buildPanel() {
+        panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setPadding(dp(6), dp(6), dp(6), dp(6));
+        panel.setBackground(rounded(Color.argb(110, 0, 0, 0), 12));
+
+        // header
+        LinearLayout head = new LinearLayout(this);
+        head.setOrientation(LinearLayout.HORIZONTAL);
+        final Button drag = headBtn("≡ geser");
+        Button setBtn = headBtn("⚙");
+        editBtn = headBtn("✎");
+        head.addView(drag);
+        head.addView(setBtn);
+        head.addView(editBtn);
+        panel.addView(head);
+
+        final float[] down = new float[4];
+        drag.setOnTouchListener((v, e) -> {
+            if (e.getActionMasked() == MotionEvent.ACTION_DOWN) {
+                down[0] = e.getRawX(); down[1] = e.getRawY();
+                down[2] = panelLp.x; down[3] = panelLp.y;
+            } else if (e.getActionMasked() == MotionEvent.ACTION_MOVE) {
+                int[] s = screen();
+                panelLp.x = (int) Math.max(0, Math.min(s[0] - dp(60), down[2] + e.getRawX() - down[0]));
+                panelLp.y = (int) Math.max(0, Math.min(s[1] - dp(60), down[3] + e.getRawY() - down[1]));
+                wm.updateViewLayout(panel, panelLp);
+            }
+            return true;
+        });
+        setBtn.setOnClickListener(v -> showPicker());
+        editBtn.setOnClickListener(v -> toggleEdit());
+
+        // body: joystick | keys | touchpad
+        LinearLayout body = new LinearLayout(this);
+        body.setOrientation(LinearLayout.HORIZONTAL);
+        body.setGravity(Gravity.CENTER_VERTICAL);
+
+        JoyPad joy = new JoyPad();
+        LinearLayout.LayoutParams jl = new LinearLayout.LayoutParams(dp(110), dp(110));
+        jl.topMargin = dp(6);
+        body.addView(joy, jl);
+
+        keysBox = new LinearLayout(this);
+        keysBox.setOrientation(LinearLayout.VERTICAL);
+        keysBox.setPadding(dp(6), dp(6), dp(6), 0);
+        body.addView(keysBox);
+        rebuildKeys();
+
+        View pad = new View(this);
+        pad.setBackground(rounded(Color.argb(110, 255, 255, 255), 10));
+        final float[] last = new float[2];
+        final long[] downT = new long[1];
+        final float[] moved = new float[1];
+        pad.setOnTouchListener((v, e) -> {
+            switch (e.getActionMasked()) {
+                case MotionEvent.ACTION_DOWN:
+                    last[0] = e.getRawX(); last[1] = e.getRawY();
+                    downT[0] = System.currentTimeMillis();
+                    moved[0] = 0;
+                    break;
+                case MotionEvent.ACTION_MOVE:
+                    float dx = e.getRawX() - last[0], dy = e.getRawY() - last[1];
+                    moved[0] += Math.abs(dx) + Math.abs(dy);
+                    last[0] = e.getRawX(); last[1] = e.getRawY();
+                    moveCursor(cx + dx * 2.2f, cy + dy * 2.2f);
+                    break;
+                case MotionEvent.ACTION_UP:
+                    if (moved[0] < dp(8) && System.currentTimeMillis() - downT[0] < 300) {
+                        tapAt(cx, cy);
+                    }
+                    break;
+                default:
+            }
+            return true;
+        });
+        LinearLayout.LayoutParams pl = new LinearLayout.LayoutParams(dp(100), dp(80));
+        pl.topMargin = dp(6);
+        body.addView(pad, pl);
+
+        panel.addView(body);
+
+        panelLp = lp(true);
         int[] s = screen();
-        panelLp.x = Math.max(0, s[0] / 2 - dp(160));
-        panelLp.y = Math.max(0, s[1] - dp(200));
-        wm.updateViewLayout(panel, panelLp);
-        cx = s[0] / 2f;
-        cy = s[1] / 2f;
-        cursorLp.x = (int) (cx - cursorSize / 2f);
-        cursorLp.y = (int) (cy - cursorSize / 2f);
-        wm.updateViewLayout(cursor, cursorLp);
-        if (editMode) showMarkers();
+        panelLp.x = dp(8);
+        panelLp.y = Math.max(0, s[1] - dp(190));
     }
 
-    // ---------- util ----------
+    // ---------------------------------------------------------------- keys
 
-    private int[] screen() {
-        DisplayMetrics m = new DisplayMetrics();
-        wm.getDefaultDisplay().getRealMetrics(m);
-        return new int[]{m.widthPixels, m.heightPixels};
+    private List<String> selected() {
+        List<String> out = new ArrayList<>();
+        for (String k : prefs.getString("keys", "E").split(",")) {
+            k = k.trim().toUpperCase();
+            if (k.length() == 1 && Character.isLetter(k.charAt(0))
+                    && !"WASD".contains(k) && !out.contains(k)) out.add(k);
+        }
+        return out;
     }
 
-    private int dp(int v) {
-        return Math.round(v * getResources().getDisplayMetrics().density);
+    private void saveSelected(List<String> l) {
+        StringBuilder sb = new StringBuilder();
+        for (String k : l) { if (sb.length() > 0) sb.append(','); sb.append(k); }
+        prefs.edit().putString("keys", sb.toString()).apply();
     }
 
-    @Override
-    public void onSharedPreferenceChanged(SharedPreferences p, String key) {
-        if ("pad".equals(key)) {
-            applyVisibility();
-            resetPositions();
+    private boolean isSet(String k) { return prefs.contains("kx_" + k); }
+
+    private void rebuildKeys() {
+        keysBox.removeAllViews();
+        LinearLayout row = null;
+        int n = 0;
+        for (final String k : selected()) {
+            if (n % 3 == 0) {
+                row = new LinearLayout(this);
+                row.setOrientation(LinearLayout.HORIZONTAL);
+                keysBox.addView(row);
+            }
+            Button b = headBtn(label(k));
+            b.setTextSize(15);
+            b.setBackground(rounded(isSet(k) ? Color.argb(220, 30, 120, 50)
+                    : Color.argb(220, 160, 90, 0), 10));
+            b.setOnClickListener(v -> {
+                if (!isSet(k)) {
+                    Toast.makeText(this, "Belum diatur. Tekan ✎ lalu geser tanda " + k
+                            + " ke tombol di game", Toast.LENGTH_LONG).show();
+                    return;
+                }
+                int[] s = screen();
+                tapAt(s[0] * prefs.getInt("kx_" + k, 0) / 1000f,
+                        s[1] * prefs.getInt("ky_" + k, 0) / 1000f);
+            });
+            LinearLayout.LayoutParams l = new LinearLayout.LayoutParams(dp(54), dp(46));
+            l.setMargins(dp(2), dp(2), dp(2), dp(2));
+            row.addView(b, l);
+            n++;
         }
     }
 
-    @Override public void onAccessibilityEvent(AccessibilityEvent event) { }
-    @Override public void onInterrupt() { }
-
-    @Override
-    public void onDestroy() {
-        if (prefs != null) prefs.unregisterOnSharedPreferenceChangeListener(this);
-        hideMarkers();
-        removeView(panel);
-        removeView(cursor);
-        removeView(picker);
-        super.onDestroy();
+    private String label(String k) {
+        String base = "E".equals(k) ? HAND + "E" : k;
+        return isSet(k) ? base : base + "?";
     }
-                }
+
+    private void showPicker() {
+        removeView(picker);
+        picker = new LinearLayout(this);
+        picker.setOrientation(LinearLayout.VERTICAL);
+        picker.setPadding(dp(10), dp(10), dp(10), dp(10));
+        picker.setBackground(rounded(Color.argb(235, 20, 20, 28), 14));
+        TextView t = new TextView(this);
+        t.setText("Pilih huruf (WASD sudah jadi joystick)");
+        t.setTextColor(Color.WHITE);
+        picker.addView(t);
+        final List<String> sel = selected();
+        String letters = "BCEFGHIJKLMNOPQRTUVXYZ";
+        LinearLayout row = null;
+        for (int i = 0; i < letters.length(); i++) {
+            if (i % 8 == 0) {
+                row = new LinearLayout(this);
+                row.setOrientation(LinearLayout.HORIZONTAL);
+                picker.addView(row);
+            }
+            final String k = String.valueOf(letters.charAt(i));
+            final Button b = headBtn(k);
+            b.setBackground(rounded(sel.contains(k) ? Color.rgb(30, 120, 50)
+                    : Color.rgb(70, 70, 80), 8));
+            b.setOnClickListener(v -> {
+                if (sel.contains(k)) sel.remove(k); else sel.add(k);
+                b.setBackground(rounded(sel.contains(k) ? Color.rgb(30, 120, 50)
+                        : Color.rgb(70, 70, 80), 8));
+            });
+            LinearLayout.LayoutParams l = new LinearLayout.LayoutParams(dp(40), dp(40));
+            l.setMargins(dp(2), dp(2), dp(2), dp(2));
+            row.addView(b, l);
+        }
+        Button ok = headBtn("OK");
+        ok.setOnClickListener(v -> {
+            saveSelected(sel);
+            removeView(picker);
+            rebuildKeys();
+            if (editMode) { hideMarkers(); showMarkers(); }
+        });
+        picker.addView(ok);
+        WindowManager.LayoutParams l = lp(true);
+        l.gravity = Gravity.CENTER;
+        wm.addView(picker, l);
+    }
+
+    // ---------------------------------------------------------------- edit mode (markers)
+
+    private void toggleEdit() {
+        editMode = !editMode;
+        editBtn.setText(editMode ? "✔" : "✎");
+        if (editMode) {
+            showMarkers();
+            Toast.makeText(this, "Geser tanda ke tombol di game, lalu tekan ✔",
+                    Toast.LENGTH_LONG).show();
+        } else {
+            hideMarkers();
+            rebuildKeys();
+        }
+    }
+
+    private void applyVisibility() {
+        boolean show = prefs.getBoolean("pad", false);
+        if (show) {
+            if (!panel.isAttachedToWindow()) wm.addView(panel, panelLp);
+            if (!cursor.isAttachedToWindow()) wm.addView(cursor, cursorLp);
+        } else {
+            hideMarkers();
+            editMode = false;
+            if (editBtn != null) editBtn.setText("✎");
+            removeView(picker);
+            removeView(panel);
+            removeView(cursor);
+        }
+    }
+
+    private void hideMarkers() {
+        for (View v : markers.values()) removeView(v);
+        markers.clear();
+    }
+
+    private void showMarkers() {
+        hideMarkers();
+        addMarker("JOY");
+        int i = 0;
+        for (String k : selected()) addMarker(k, i++);
+    }
+
+    private void addMarker(String id) { addMarker(id, 0); }
+
+    private void addMarker(final String id, int order) {
+        final boolean joy = "JOY".equals(id);
+        final int size = dp(joy ? 64 : 52);
+        final int[] s = screen();
+        float px, py;
+        boolean set;
+        if (joy) {
+            px = joyX(); py = joyY(); set = true;
+        } else if (isSet(id)) {
+            px = s[0] * prefs.getInt("kx_" + id, 0) / 1000f;
+            py = s[1] * prefs.getInt("ky_" + id, 0) / 1000f;
+            set = true;
+        } else {
+            px = s[0] * 0.5f + order * dp(60);
+            py = s[1] * 0.3f;
+            set = false;
+        }
+        final TextView m = new TextView(this);
+        m.setGravity(Gravity.CENTER);
+        m.setTextColor(Color.WHITE);
+        m.setTextSize(joy ? 18 : 16);
+        m.setText(joy ? JOY : ("E".equals(id) ? HAND + "E" : id));
+        markerBg(m, joy ? true : set, joy);
+
+        final WindowManager.LayoutParams l = lp(true);
+        l.width = size;
+        l.height = size;
+        l.x = (int) px - size / 2;
+        l.y = (int) py - size / 2;
+
+        final float[] st = new float[4];
+        m.setOnTouchListener((v, e) -> {
+            switch (e.getActionMasked()) {
+                case MotionEvent.ACTION_DOWN:
+                    st[0] = e.getRawX(); st[1] = e.getRawY();
+                    st[2] = l.x; st[3] = l.y;
+                    break;
+                case MotionEvent.ACTION_MOVE:
+                    l.x = (int) (st[2] + e.getRawX() - st[0]);
+                    l.y = (int) (st[3] + e.getRawY() - st[1]);
+                    wm.updateViewLayout(m, l);
+                    break;
+                case MotionEvent.ACTION_UP:
+                    saveMarker(id, l.x + size / 2f, l.y + size / 2f);
+                    markerBg(m, true, joy);
+                    break;
+                default:
+            }
+            return true;
+        });
+        wm.addView(m, l);
+        markers.put(id, m);
+    }
+
+    private void markerBg(TextView m, boolean set, boolean joy) {
+        GradientDrawable g = new GradientDrawable();
+        g.setShape(GradientDrawable.OVAL);
+        g.setColor(joy ? Color.argb(190, 255, 120, 0)
+                : set ? Color.argb(210, 30, 150, 60) : Color.argb(210, 230, 130, 0));
+        g.setStroke(dp(2), Color.WHITE);
+        m.setBackground(g);
+    }
+
+    private void saveMarker(String id, float x, float y) {
+        int[] s = screen();
+        if ("JOY".equals(id)) {
+            prefs.edit().putInt("jx", Math.round(x * 100f / s[0]))
+                    .putInt("jy", Math.round(y * 100f / s[1])).apply();
+        } else {
+            prefs.edit().putInt("kx_" + id, Math.round(x * 1000f / s[0]))
+                    .putInt("ky_" + id, Math.round(y * 1000f / s[1])).apply();
+        }
+    }
+}
