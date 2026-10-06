@@ -15,12 +15,13 @@ import android.view.MotionEvent;
 import android.view.View;
 import android.view.WindowManager;
 import android.view.accessibility.AccessibilityEvent;
-import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import java.util.HashMap;
 import java.util.LinkedHashSet;
+import java.util.Map;
 import java.util.Set;
 
 public class GameService extends AccessibilityService
@@ -28,6 +29,8 @@ public class GameService extends AccessibilityService
 
     private static final String[] ROWS = {"QWERTYUIOP", "ASDFGHJKL", "ZXCVBNM", "1234567890"};
     private static final String ORDER = "QWERTYUIOPASDFGHJKLZXCVBNM1234567890";
+    private static final String HAND = "\uD83D\uDD90";
+    private static final String JOYSTICK = "\uD83D\uDD79";
 
     private WindowManager wm;
     private SharedPreferences prefs;
@@ -40,7 +43,7 @@ public class GameService extends AccessibilityService
     private View cursor;
     private WindowManager.LayoutParams cursorLp;
     private View picker;
-    private View capture;
+    private final Map<String, View> markers = new HashMap<>();
     private int cursorSize;
     private float cx, cy;
     private boolean editMode;
@@ -153,7 +156,6 @@ public class GameService extends AccessibilityService
         panel.setPadding(dp(6), dp(4), dp(6), dp(6));
         panel.setBackground(rounded(0xAA000000));
 
-        // baris atas: geser | pilih huruf | atur titik
         LinearLayout head = new LinearLayout(this);
         TextView handle = headBtn("\u2261 geser");
         handle.setTextSize(11);
@@ -268,21 +270,30 @@ public class GameService extends AccessibilityService
         }
     }
 
+    private boolean isSet(String k) {
+        return isMove(k) || prefs.contains("kx_" + k);
+    }
+
     private TextView key(final String k) {
         final TextView t = new TextView(this);
-        t.setText(k);
+        boolean set = isSet(k);
+        String label = k;
+        if (k.equals("E")) label = set ? "E\n" + HAND : "E\n?";
+        else if (!set) label = k + "\n?";
+        t.setText(label);
         t.setTextColor(Color.WHITE);
-        t.setTextSize(17);
+        t.setTextSize(set && !k.equals("E") ? 17 : 13);
         t.setGravity(Gravity.CENTER);
         t.setBackground(rounded(editMode ? 0xFF8D5A00 : 0xAA444444));
-        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(dp(40), dp(40));
+        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(dp(40), dp(44));
         p.setMargins(dp(1), dp(1), dp(1), dp(1));
         t.setLayoutParams(p);
         t.setOnTouchListener((v, e) -> {
             switch (e.getActionMasked()) {
                 case MotionEvent.ACTION_DOWN:
                     if (editMode) {
-                        armCapture(k);
+                        Toast.makeText(this, "Seret penanda bulat di layar ke tombol game",
+                                Toast.LENGTH_SHORT).show();
                         return true;
                     }
                     t.setAlpha(0.5f);
@@ -303,8 +314,11 @@ public class GameService extends AccessibilityService
         editMode = !editMode;
         editBtn.setTextColor(editMode ? 0xFFFFA000 : Color.WHITE);
         if (editMode) {
-            Toast.makeText(this, "Mode atur titik: tekan huruf, lalu ketuk titiknya di layar game. "
-                    + "Untuk joystick: tekan W.", Toast.LENGTH_LONG).show();
+            showMarkers();
+            Toast.makeText(this, "Seret penanda ke tombol di game. Oranye = belum diatur, "
+                    + "hijau = sudah. Tekan \u270E lagi kalau selesai.", Toast.LENGTH_LONG).show();
+        } else {
+            hideMarkers();
         }
         rebuildKeys();
     }
@@ -313,6 +327,122 @@ public class GameService extends AccessibilityService
         int vis = prefs.getBoolean("pad", true) ? View.VISIBLE : View.GONE;
         if (panel != null) panel.setVisibility(vis);
         if (cursor != null) cursor.setVisibility(vis);
+    }
+
+    // ---------- penanda yang bisa diseret ----------
+
+    private void hideMarkers() {
+        for (View v : markers.values()) removeView(v);
+        markers.clear();
+    }
+
+    private void showMarkers() {
+        hideMarkers();
+        Set<String> sel = selected();
+        boolean hasMove = false;
+        int i = 0;
+        for (char c : ORDER.toCharArray()) {
+            String k = String.valueOf(c);
+            if (!sel.contains(k)) continue;
+            if (isMove(k)) {
+                hasMove = true;
+                continue;
+            }
+            addMarker(k, i++);
+        }
+        if (hasMove) addMarker("JOY", i);
+    }
+
+    private void markerBg(View v, boolean set) {
+        GradientDrawable g = new GradientDrawable();
+        g.setShape(GradientDrawable.OVAL);
+        g.setColor(set ? 0xCC2E7D32 : 0xCCE65100);
+        g.setStroke(dp(2), Color.WHITE);
+        v.setBackground(g);
+    }
+
+    private void addMarker(final String id, int index) {
+        final int size = dp(52);
+        int[] s = screen();
+        boolean set;
+        float px, py;
+        if (id.equals("JOY")) {
+            px = joyX();
+            py = joyY();
+            set = prefs.contains("jx");
+        } else if (prefs.contains("kx_" + id)) {
+            px = s[0] * prefs.getInt("kx_" + id, 0) / 1000f;
+            py = s[1] * prefs.getInt("ky_" + id, 0) / 1000f;
+            set = true;
+        } else {
+            px = Math.min(s[0] - size, dp(40) + index * dp(62));
+            py = dp(90);
+            set = false;
+        }
+
+        String label;
+        if (id.equals("JOY")) label = JOYSTICK + "\nJoy";
+        else if (id.equals("E")) label = HAND + "\nE";
+        else label = id;
+
+        final TextView t = new TextView(this);
+        t.setText(label);
+        t.setTextColor(Color.WHITE);
+        t.setTextSize(15);
+        t.setGravity(Gravity.CENTER);
+        markerBg(t, set);
+
+        final WindowManager.LayoutParams p = lp(true);
+        p.width = size;
+        p.height = size;
+        p.x = (int) (px - size / 2f);
+        p.y = (int) (py - size / 2f);
+
+        t.setOnTouchListener(new View.OnTouchListener() {
+            float dx, dy;
+            int sx, sy;
+            @Override
+            public boolean onTouch(View v, MotionEvent e) {
+                switch (e.getActionMasked()) {
+                    case MotionEvent.ACTION_DOWN:
+                        dx = e.getRawX();
+                        dy = e.getRawY();
+                        sx = p.x;
+                        sy = p.y;
+                        return true;
+                    case MotionEvent.ACTION_MOVE:
+                        p.x = sx + (int) (e.getRawX() - dx);
+                        p.y = sy + (int) (e.getRawY() - dy);
+                        wm.updateViewLayout(t, p);
+                        return true;
+                    case MotionEvent.ACTION_UP:
+                        saveMarker(id, p.x + size / 2f, p.y + size / 2f);
+                        markerBg(t, true);
+                        return true;
+                }
+                return true;
+            }
+        });
+        markers.put(id, t);
+        wm.addView(t, p);
+    }
+
+    private void saveMarker(String id, float x, float y) {
+        int[] s = screen();
+        if (id.equals("JOY")) {
+            prefs.edit()
+                    .putInt("jx", Math.round(x * 100f / s[0]))
+                    .putInt("jy", Math.round(y * 100f / s[1]))
+                    .apply();
+            Toast.makeText(this, "Titik joystick tersimpan", Toast.LENGTH_SHORT).show();
+        } else {
+            prefs.edit()
+                    .putInt("kx_" + id, Math.round(x * 1000f / s[0]))
+                    .putInt("ky_" + id, Math.round(y * 1000f / s[1]))
+                    .apply();
+            Toast.makeText(this, "Titik " + id + " tersimpan", Toast.LENGTH_SHORT).show();
+        }
+        rebuildKeys();
     }
 
     // ---------- pilih huruf ----------
@@ -386,6 +516,7 @@ public class GameService extends AccessibilityService
             removeView(picker);
             picker = null;
             rebuildKeys();
+            if (editMode) showMarkers();
         });
         LinearLayout.LayoutParams dp2 = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, dp(48));
@@ -396,63 +527,11 @@ public class GameService extends AccessibilityService
         wm.addView(root, lpFull());
     }
 
-    // ---------- atur titik ----------
+    // ---------- input ke game ----------
 
     private boolean isMove(String k) {
         return k.equals("W") || k.equals("A") || k.equals("S") || k.equals("D");
     }
-
-    private void armCapture(final String k) {
-        removeView(capture);
-        FrameLayout f = new FrameLayout(this);
-        f.setBackgroundColor(0x44000000);
-        TextView t = new TextView(this);
-        t.setText(isMove(k)
-                ? "Ketuk titik TENGAH joystick di game\n(tap tulisan ini = batal)"
-                : "Ketuk titik tombol '" + k + "' di layar game\n(tap tulisan ini = batal)");
-        t.setTextColor(Color.WHITE);
-        t.setTextSize(15);
-        t.setGravity(Gravity.CENTER);
-        t.setBackgroundColor(0xCC000000);
-        t.setPadding(dp(12), dp(40), dp(12), dp(12));
-        t.setOnClickListener(v -> {
-            removeView(capture);
-            capture = null;
-        });
-        f.addView(t, new FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.WRAP_CONTENT,
-                FrameLayout.LayoutParams.WRAP_CONTENT,
-                Gravity.TOP | Gravity.CENTER_HORIZONTAL));
-        f.setOnTouchListener((v, e) -> {
-            if (e.getActionMasked() == MotionEvent.ACTION_UP) {
-                saveCapture(k, e.getRawX(), e.getRawY());
-                removeView(capture);
-                capture = null;
-            }
-            return true;
-        });
-        capture = f;
-        wm.addView(f, lpFull());
-    }
-
-    private void saveCapture(String k, float rx, float ry) {
-        int[] s = screen();
-        if (isMove(k)) {
-            prefs.edit()
-                    .putInt("jx", Math.round(rx * 100f / s[0]))
-                    .putInt("jy", Math.round(ry * 100f / s[1]))
-                    .apply();
-            Toast.makeText(this, "Titik joystick tersimpan", Toast.LENGTH_SHORT).show();
-        } else {
-            prefs.edit()
-                    .putInt("kx_" + k, Math.round(rx * 1000f / s[0]))
-                    .putInt("ky_" + k, Math.round(ry * 1000f / s[1]))
-                    .apply();
-            Toast.makeText(this, "Titik " + k + " tersimpan", Toast.LENGTH_SHORT).show();
-        }
-    }
-
-    // ---------- input ke game ----------
 
     private void press(String k, boolean down) {
         switch (k) {
@@ -473,11 +552,8 @@ public class GameService extends AccessibilityService
         if (prefs.contains("kx_" + k)) {
             tapAt(s[0] * prefs.getInt("kx_" + k, 0) / 1000f,
                     s[1] * prefs.getInt("ky_" + k, 0) / 1000f);
-        } else if (k.equals("E")) {
-            tapAt(s[0] * prefs.getInt("ex", 85) / 100f,
-                    s[1] * prefs.getInt("ey", 60) / 100f);
         } else {
-            Toast.makeText(this, "Atur titik " + k + " dulu (tombol \u270E)",
+            Toast.makeText(this, k + " belum diatur. Tekan \u270E lalu seret penandanya ke tombol game.",
                     Toast.LENGTH_SHORT).show();
         }
     }
@@ -551,8 +627,10 @@ public class GameService extends AccessibilityService
                 .addStroke(new GestureDescription.StrokeDescription(p, 0, 50))
                 .build(), null, null);
     }
-    // ---------- util ----------
-@Override
+
+    // ---------- rotasi layar ----------
+
+    @Override
     public void onConfigurationChanged(android.content.res.Configuration newConfig) {
         super.onConfigurationChanged(newConfig);
         ui.postDelayed(this::resetPositions, 400);
@@ -569,7 +647,11 @@ public class GameService extends AccessibilityService
         cursorLp.x = (int) (cx - cursorSize / 2f);
         cursorLp.y = (int) (cy - cursorSize / 2f);
         wm.updateViewLayout(cursor, cursorLp);
+        if (editMode) showMarkers();
     }
+
+    // ---------- util ----------
+
     private int[] screen() {
         DisplayMetrics m = new DisplayMetrics();
         wm.getDefaultDisplay().getRealMetrics(m);
@@ -582,7 +664,10 @@ public class GameService extends AccessibilityService
 
     @Override
     public void onSharedPreferenceChanged(SharedPreferences p, String key) {
-        if ("pad".equals(key)) applyVisibility();
+        if ("pad".equals(key)) {
+            applyVisibility();
+            resetPositions();
+        }
     }
 
     @Override public void onAccessibilityEvent(AccessibilityEvent event) { }
@@ -591,10 +676,10 @@ public class GameService extends AccessibilityService
     @Override
     public void onDestroy() {
         if (prefs != null) prefs.unregisterOnSharedPreferenceChangeListener(this);
+        hideMarkers();
         removeView(panel);
         removeView(cursor);
         removeView(picker);
-        removeView(capture);
         super.onDestroy();
     }
-                                           }
+                }
