@@ -335,7 +335,8 @@ public class GameService extends AccessibilityService
         if (active) {
             float sx = joyStroke == null ? joyX() : jLastX;
             float sy = joyStroke == null ? joyY() : jLastY;
-            js = seg(joyStroke, sx, sy, tx, ty, true, 110);
+            boolean same = joyStroke != null && tx == jLastX && ty == jLastY;
+            js = seg(joyStroke, sx, sy, tx, ty, true, same ? 250 : 100);
             jc = true;
             jLastX = tx; jLastY = ty;
             gb.addStroke(js);
@@ -349,7 +350,8 @@ public class GameService extends AccessibilityService
         if (lookDown && !lookWrap) {
             float sx = lookStroke == null ? lookPX() : lLastX;
             float sy = lookStroke == null ? lookPY() : lLastY;
-            ls = seg(lookStroke, sx, sy, ltx, lty, true, 110);
+            boolean lsame = lookStroke != null && ltx == lLastX && lty == lLastY;
+            ls = seg(lookStroke, sx, sy, ltx, lty, true, lsame ? 150 : 100);
             lc = true;
             lLastX = ltx; lLastY = lty;
             gb.addStroke(ls);
@@ -362,6 +364,13 @@ public class GameService extends AccessibilityService
                 ltx = lookPX(); lty = lookPY();
                 lookWrap = false;
             }
+        }
+        if (hasTap) {
+            Path tp = new Path();
+            tp.moveTo(tapX, tapY);
+            gb.addStroke(new GestureDescription.StrokeDescription(tp, 0, 100));
+            hasTap = false;
+            any = true;
         }
         if (!any) return;
 
@@ -413,28 +422,15 @@ public class GameService extends AccessibilityService
         Toast.makeText(this, m, Toast.LENGTH_SHORT).show();
     }
 
+    private boolean hasTap = false;
+    private float tapX, tapY;
+
+    /** A tap rides along in the same gesture as the held joystick, so walking is not cut. */
     private void tapAt(float x, float y) {
-        Path p = new Path();
-        p.moveTo(x, y);
-        final int my = ++gen;
-        joyStroke = null;
-        lookStroke = null;
-        inFlight = true;
-        boolean ok = dispatchGesture(new GestureDescription.Builder()
-                .addStroke(new GestureDescription.StrokeDescription(p, 0, 50)).build(),
-                new GestureResultCallback() {
-                    @Override public void onCompleted(GestureDescription g) {
-                        if (my != gen) return;
-                        inFlight = false;
-                        pump();
-                    }
-                    @Override public void onCancelled(GestureDescription g) {
-                        if (my != gen) return;
-                        inFlight = false;
-                        pump();
-                    }
-                }, ui);
-        if (!ok) inFlight = false;
+        tapX = x;
+        tapY = y;
+        hasTap = true;
+        pump();
     }
 
     // ---------------------------------------------------------------- camera
