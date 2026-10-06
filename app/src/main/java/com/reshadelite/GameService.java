@@ -42,6 +42,9 @@ public class GameService extends AccessibilityService
     private LinearLayout panel;
     private LinearLayout keysBox;
     private Button editBtn;
+    private LinearLayout sizeRow;
+    private final Map<String, WindowManager.LayoutParams> markerLp = new HashMap<>();
+    private String selMarker = null;
     private WindowManager.LayoutParams panelLp;
     private View cursor;
     private WindowManager.LayoutParams cursorLp;
@@ -150,6 +153,12 @@ public class GameService extends AccessibilityService
         return Math.round(v * getResources().getDisplayMetrics().density);
     }
 
+    private float ps() { return prefs.getInt("ps", 100) / 100f; }
+
+    private int pdp(int v) {
+        return Math.round(v * getResources().getDisplayMetrics().density * ps());
+    }
+
     private int[] screen() {
         DisplayMetrics m = new DisplayMetrics();
         wm.getDefaultDisplay().getRealMetrics(m);
@@ -234,31 +243,54 @@ public class GameService extends AccessibilityService
 
     private boolean kw, ka, ks, kd;
 
-    /** Letter button that stays pressed while the finger is on it. */
+    private final boolean[] latched = new boolean[4];
+    private final boolean[] ignoreUp = new boolean[4];
+    private final long[] pressT = new long[4];
+
+    private void setKey(String k, boolean down) {
+        if (k.equals("W")) kw = down;
+        else if (k.equals("A")) ka = down;
+        else if (k.equals("S")) ks = down;
+        else kd = down;
+        float dx = (kd ? 1 : 0) - (ka ? 1 : 0);
+        float dy = (ks ? 1 : 0) - (kw ? 1 : 0);
+        float len = (float) Math.hypot(dx, dy);
+        if (len > 0) { dx /= len; dy /= len; }
+        setJoy(dx, dy);
+    }
+
+    /** Hold = walk while held. Quick tap = keeps walking until you tap it again. */
     private Button holdKey(final String k) {
         final Button b = headBtn(k);
+        final int i = "WASD".indexOf(k);
         b.setTextSize(17);
         b.setBackground(rounded(Color.argb(220, 60, 60, 80), 10));
         b.setOnTouchListener((v, e) -> {
             int a = e.getActionMasked();
-            boolean down;
-            if (a == MotionEvent.ACTION_DOWN) down = true;
-            else if (a == MotionEvent.ACTION_UP || a == MotionEvent.ACTION_CANCEL) down = false;
-            else return true;
-            b.setBackground(rounded(down ? Color.argb(240, 255, 120, 0)
-                    : Color.argb(220, 60, 60, 80), 10));
-            if (k.equals("W")) kw = down;
-            else if (k.equals("A")) ka = down;
-            else if (k.equals("S")) ks = down;
-            else kd = down;
-            float dx = (kd ? 1 : 0) - (ka ? 1 : 0);
-            float dy = (ks ? 1 : 0) - (kw ? 1 : 0);
-            float len = (float) Math.hypot(dx, dy);
-            if (len > 0) { dx /= len; dy /= len; }
-            setJoy(dx, dy);
+            if (a == MotionEvent.ACTION_DOWN) {
+                if (latched[i]) {
+                    latched[i] = false;
+                    ignoreUp[i] = true;
+                    b.setBackground(rounded(Color.argb(220, 60, 60, 80), 10));
+                    setKey(k, false);
+                } else {
+                    ignoreUp[i] = false;
+                    pressT[i] = System.currentTimeMillis();
+                    b.setBackground(rounded(Color.argb(240, 255, 120, 0), 10));
+                    setKey(k, true);
+                }
+            } else if (a == MotionEvent.ACTION_UP || a == MotionEvent.ACTION_CANCEL) {
+                if (ignoreUp[i]) return true;
+                if (System.currentTimeMillis() - pressT[i] < 280) {
+                    latched[i] = true; // quick tap: stay on
+                } else {
+                    b.setBackground(rounded(Color.argb(220, 60, 60, 80), 10));
+                    setKey(k, false);
+                }
+            }
             return true;
         });
-        LinearLayout.LayoutParams l = new LinearLayout.LayoutParams(dp(50), dp(46));
+        LinearLayout.LayoutParams l = new LinearLayout.LayoutParams(pdp(50), pdp(46));
         b.setLayoutParams(l);
         return b;
     }
@@ -350,14 +382,35 @@ public class GameService extends AccessibilityService
                 inFlight = false;
                 joyStroke = null;
                 lookStroke = null;
-                pump();
+                warn("Gerakan dibatalkan sistem");
+                ui.postDelayed(() -> pump(), 150);
             }
         }, ui);
         if (!ok) {
             inFlight = false;
             joyStroke = null;
             lookStroke = null;
+            warn("Gagal kirim gerakan (cek Aksesibilitas)");
+        } else {
+            // safety: if the system never answers, unstick and retry
+            ui.postDelayed(() -> {
+                if (gen == my && inFlight) {
+                    inFlight = false;
+                    joyStroke = null;
+                    lookStroke = null;
+                    pump();
+                }
+            }, 700);
         }
+    }
+
+    private long lastWarn = 0;
+
+    private void warn(String m) {
+        long n = System.currentTimeMillis();
+        if (n - lastWarn < 3000) return;
+        lastWarn = n;
+        Toast.makeText(this, m, Toast.LENGTH_SHORT).show();
     }
 
     private void tapAt(float x, float y) {
@@ -389,7 +442,7 @@ public class GameService extends AccessibilityService
     private float lookPX() { return screen()[0] * prefs.getInt("lx", 70) / 100f; }
     private float lookPY() { return screen()[1] * prefs.getInt("ly", 50) / 100f; }
     private boolean lookMode() { return prefs.getBoolean("look", true); }
-    private int sens() { return prefs.getInt("sens", 4); }
+    private int sens() { return prefs.getInt("sens", 5); }
 
     private void lookStart() {
         lookDown = true;
@@ -400,7 +453,7 @@ public class GameService extends AccessibilityService
 
     private void lookMove(float dx, float dy) {
         int[] s = screen();
-        float gain = sens() * 0.6f;
+        float gain = sens() * 0.12f;
         ltx += dx * gain;
         lty += dy * gain;
         float mx = s[0] * 0.03f, my = s[1] * 0.03f;
@@ -425,12 +478,12 @@ public class GameService extends AccessibilityService
         b.setText(label);
         b.setAllCaps(false);
         b.setTextColor(Color.WHITE);
-        b.setTextSize(13);
+        b.setTextSize(13 * ps());
         b.setMinWidth(0);
         b.setMinHeight(0);
         b.setMinimumWidth(0);
         b.setMinimumHeight(0);
-        b.setPadding(dp(10), dp(4), dp(10), dp(4));
+        b.setPadding(pdp(10), pdp(4), pdp(10), pdp(4));
         b.setBackground(rounded(Color.argb(200, 60, 60, 70), 8));
         return b;
     }
@@ -438,7 +491,7 @@ public class GameService extends AccessibilityService
     private void buildPanel() {
         panel = new LinearLayout(this);
         panel.setOrientation(LinearLayout.VERTICAL);
-        panel.setPadding(dp(6), dp(6), dp(6), dp(6));
+        panel.setPadding(pdp(6), pdp(6), pdp(6), pdp(6));
         panel.setBackground(rounded(Color.argb(110, 0, 0, 0), 12));
 
         // header
@@ -455,6 +508,24 @@ public class GameService extends AccessibilityService
         head.addView(lookBtn);
         head.addView(sensBtn);
         panel.addView(head);
+
+        sizeRow = new LinearLayout(this);
+        sizeRow.setOrientation(LinearLayout.HORIZONTAL);
+        Button tMin = headBtn("Tanda \u2212");
+        Button tPlus = headBtn("Tanda +");
+        Button pMin = headBtn("Panel \u2212");
+        Button pPlus = headBtn("Panel +");
+        sizeRow.addView(tMin);
+        sizeRow.addView(tPlus);
+        sizeRow.addView(pMin);
+        sizeRow.addView(pPlus);
+        sizeRow.setVisibility(editMode ? View.VISIBLE : View.GONE);
+        panel.addView(sizeRow);
+        tMin.setOnClickListener(v -> resizeMarker(-6));
+        tPlus.setOnClickListener(v -> resizeMarker(6));
+        pMin.setOnClickListener(v -> resizePanel(-10));
+        pPlus.setOnClickListener(v -> resizePanel(10));
+        editBtn.setText(editMode ? "\u2714" : "\u270E");
         lookBtn.setOnClickListener(v -> {
             boolean m = !lookMode();
             prefs.edit().putBoolean("look", m).apply();
@@ -475,8 +546,8 @@ public class GameService extends AccessibilityService
                 down[2] = panelLp.x; down[3] = panelLp.y;
             } else if (e.getActionMasked() == MotionEvent.ACTION_MOVE) {
                 int[] s = screen();
-                panelLp.x = (int) Math.max(0, Math.min(s[0] - dp(60), down[2] + e.getRawX() - down[0]));
-                panelLp.y = (int) Math.max(0, Math.min(s[1] - dp(60), down[3] + e.getRawY() - down[1]));
+                panelLp.x = (int) Math.max(0, Math.min(s[0] - pdp(60), down[2] + e.getRawX() - down[0]));
+                panelLp.y = (int) Math.max(0, Math.min(s[1] - pdp(60), down[3] + e.getRawY() - down[1]));
                 wm.updateViewLayout(panel, panelLp);
             }
             return true;
@@ -496,19 +567,19 @@ public class GameService extends AccessibilityService
         r1.setOrientation(LinearLayout.HORIZONTAL);
         r2.setOrientation(LinearLayout.HORIZONTAL);
         View sp = new View(this);
-        r1.addView(sp, new LinearLayout.LayoutParams(dp(50), dp(46)));
+        r1.addView(sp, new LinearLayout.LayoutParams(pdp(50), pdp(46)));
         r1.addView(holdKey("W"));
         r2.addView(holdKey("A"));
         r2.addView(holdKey("S"));
         r2.addView(holdKey("D"));
         wasd.addView(r1);
         wasd.addView(r2);
-        wasd.setPadding(0, dp(6), 0, 0);
+        wasd.setPadding(0, pdp(6), 0, 0);
         body.addView(wasd);
 
         keysBox = new LinearLayout(this);
         keysBox.setOrientation(LinearLayout.VERTICAL);
-        keysBox.setPadding(dp(6), dp(6), dp(6), 0);
+        keysBox.setPadding(pdp(6), pdp(6), pdp(6), 0);
         body.addView(keysBox);
         rebuildKeys();
 
@@ -538,7 +609,7 @@ public class GameService extends AccessibilityService
                     if (look) {
                         lookEnd();
                     } else if (e.getActionMasked() == MotionEvent.ACTION_UP
-                            && moved[0] < dp(8) && System.currentTimeMillis() - downT[0] < 300) {
+                            && moved[0] < pdp(8) && System.currentTimeMillis() - downT[0] < 300) {
                         tapAt(cx, cy);
                     }
                     break;
@@ -546,16 +617,18 @@ public class GameService extends AccessibilityService
             }
             return true;
         });
-        LinearLayout.LayoutParams pl = new LinearLayout.LayoutParams(dp(120), dp(96));
-        pl.topMargin = dp(6);
+        LinearLayout.LayoutParams pl = new LinearLayout.LayoutParams(pdp(120), pdp(96));
+        pl.topMargin = pdp(6);
         body.addView(pad, pl);
 
         panel.addView(body);
 
-        panelLp = lp(true);
-        int[] s = screen();
-        panelLp.x = dp(8);
-        panelLp.y = Math.max(0, s[1] - dp(190));
+        if (panelLp == null) {
+            panelLp = lp(true);
+            int[] s = screen();
+            panelLp.x = dp(8);
+            panelLp.y = Math.max(0, s[1] - dp(190));
+        }
     }
 
     // ---------------------------------------------------------------- keys
@@ -589,7 +662,7 @@ public class GameService extends AccessibilityService
                 keysBox.addView(row);
             }
             Button b = headBtn(label(k));
-            b.setTextSize(15);
+            b.setTextSize(15 * ps());
             b.setBackground(rounded(isSet(k) ? Color.argb(220, 30, 120, 50)
                     : Color.argb(220, 160, 90, 0), 10));
             b.setOnClickListener(v -> {
@@ -602,8 +675,8 @@ public class GameService extends AccessibilityService
                 tapAt(s[0] * prefs.getInt("kx_" + k, 0) / 1000f,
                         s[1] * prefs.getInt("ky_" + k, 0) / 1000f);
             });
-            LinearLayout.LayoutParams l = new LinearLayout.LayoutParams(dp(54), dp(46));
-            l.setMargins(dp(2), dp(2), dp(2), dp(2));
+            LinearLayout.LayoutParams l = new LinearLayout.LayoutParams(pdp(54), pdp(46));
+            l.setMargins(pdp(2), pdp(2), pdp(2), pdp(2));
             row.addView(b, l);
             n++;
         }
@@ -664,14 +737,50 @@ public class GameService extends AccessibilityService
     private void toggleEdit() {
         editMode = !editMode;
         editBtn.setText(editMode ? "✔" : "✎");
+        sizeRow.setVisibility(editMode ? View.VISIBLE : View.GONE);
+        selMarker = null;
         if (editMode) {
             showMarkers();
-            Toast.makeText(this, "Geser tanda ke tombol di game, lalu tekan ✔",
+            Toast.makeText(this, "Geser tanda ke tombol game. Ketuk tanda lalu Tanda -/+ untuk ukuran. Selesai: ✔",
                     Toast.LENGTH_LONG).show();
         } else {
             hideMarkers();
             rebuildKeys();
         }
+    }
+
+    private void rebuildPanel() {
+        boolean att = panel != null && panel.isAttachedToWindow();
+        removeView(panel);
+        buildPanel();
+        if (att) wm.addView(panel, panelLp);
+    }
+
+    private void resizePanel(int delta) {
+        int n = Math.max(60, Math.min(160, prefs.getInt("ps", 100) + delta));
+        prefs.edit().putInt("ps", n).apply();
+        rebuildPanel();
+        Toast.makeText(this, "Ukuran panel " + n + "%", Toast.LENGTH_SHORT).show();
+    }
+
+    private void resizeMarker(int deltaDp) {
+        View v = selMarker == null ? null : markers.get(selMarker);
+        WindowManager.LayoutParams l = selMarker == null ? null : markerLp.get(selMarker);
+        if (v == null || l == null) {
+            Toast.makeText(this, "Ketuk dulu satu tanda di layar", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        boolean j = "JOY".equals(selMarker) || "LOOK".equals(selMarker);
+        int cur = prefs.getInt("sz_" + selMarker, j ? 64 : 52);
+        int n = Math.max(28, Math.min(160, cur + deltaDp));
+        float centerX = l.x + l.width / 2f, centerY = l.y + l.height / 2f;
+        l.width = dp(n);
+        l.height = dp(n);
+        l.x = (int) (centerX - l.width / 2f);
+        l.y = (int) (centerY - l.height / 2f);
+        ((TextView) v).setTextSize(n * 0.3f);
+        wm.updateViewLayout(v, l);
+        prefs.edit().putInt("sz_" + selMarker, n).apply();
     }
 
     private void applyVisibility() {
@@ -692,6 +801,8 @@ public class GameService extends AccessibilityService
     private void hideMarkers() {
         for (View v : markers.values()) removeView(v);
         markers.clear();
+        markerLp.clear();
+        selMarker = null;
     }
 
     private void showMarkers() {
@@ -704,32 +815,42 @@ public class GameService extends AccessibilityService
 
     private void addMarker(String id) { addMarker(id, 0); }
 
+    private boolean markerSet(String id) {
+        if ("JOY".equals(id)) return prefs.contains("jx");
+        if ("LOOK".equals(id)) return prefs.contains("lx");
+        return isSet(id);
+    }
+
+    private void selectMarker(String id) {
+        selMarker = id;
+        for (Map.Entry<String, View> en : markers.entrySet()) {
+            markerBg((TextView) en.getValue(), en.getKey());
+        }
+    }
+
     private void addMarker(final String id, int order) {
         final boolean look = "LOOK".equals(id);
         final boolean joy = "JOY".equals(id) || look;
-        final int size = dp(joy ? 64 : 52);
+        final int sizeDp = prefs.getInt("sz_" + id, joy ? 64 : 52);
+        final int size = dp(sizeDp);
         final int[] s = screen();
         float px, py;
-        boolean set;
         if (look) {
-            px = lookPX(); py = lookPY(); set = true;
+            px = lookPX(); py = lookPY();
         } else if (joy) {
-            px = joyX(); py = joyY(); set = true;
+            px = joyX(); py = joyY();
         } else if (isSet(id)) {
             px = s[0] * prefs.getInt("kx_" + id, 0) / 1000f;
             py = s[1] * prefs.getInt("ky_" + id, 0) / 1000f;
-            set = true;
         } else {
             px = s[0] * 0.5f + order * dp(60);
             py = s[1] * 0.3f;
-            set = false;
         }
         final TextView m = new TextView(this);
         m.setGravity(Gravity.CENTER);
         m.setTextColor(Color.WHITE);
-        m.setTextSize(joy ? 18 : 16);
+        m.setTextSize(sizeDp * 0.3f);
         m.setText(look ? "\uD83D\uDC41" : joy ? JOY : ("E".equals(id) ? HAND + "E" : id));
-        markerBg(m, joy || set, joy);
 
         final WindowManager.LayoutParams l = lp(true);
         l.width = size;
@@ -737,21 +858,26 @@ public class GameService extends AccessibilityService
         l.x = (int) px - size / 2;
         l.y = (int) py - size / 2;
 
-        final float[] st = new float[4];
+        final float[] st = new float[5];
         m.setOnTouchListener((v, e) -> {
             switch (e.getActionMasked()) {
                 case MotionEvent.ACTION_DOWN:
                     st[0] = e.getRawX(); st[1] = e.getRawY();
-                    st[2] = l.x; st[3] = l.y;
+                    st[2] = l.x; st[3] = l.y; st[4] = 0;
+                    selectMarker(id);
                     break;
                 case MotionEvent.ACTION_MOVE:
+                    st[4] += Math.abs(e.getRawX() - st[0]) + Math.abs(e.getRawY() - st[1]) > 0 ? 1 : 0;
                     l.x = (int) (st[2] + e.getRawX() - st[0]);
                     l.y = (int) (st[3] + e.getRawY() - st[1]);
                     wm.updateViewLayout(m, l);
                     break;
                 case MotionEvent.ACTION_UP:
-                    saveMarker(id, l.x + size / 2f, l.y + size / 2f);
-                    markerBg(m, true, joy);
+                    float moved = Math.abs(l.x - st[2]) + Math.abs(l.y - st[3]);
+                    if (moved > dp(6) || markerSet(id)) {
+                        saveMarker(id, l.x + l.width / 2f, l.y + l.height / 2f);
+                        markerBg(m, id);
+                    }
                     break;
                 default:
             }
@@ -759,14 +885,17 @@ public class GameService extends AccessibilityService
         });
         wm.addView(m, l);
         markers.put(id, m);
+        markerLp.put(id, l);
+        markerBg(m, id);
     }
 
-    private void markerBg(TextView m, boolean set, boolean joy) {
+    /** Green = placed, orange = not placed yet. Yellow frame = selected. */
+    private void markerBg(TextView m, String id) {
         GradientDrawable g = new GradientDrawable();
         g.setShape(GradientDrawable.OVAL);
-        g.setColor(joy ? Color.argb(190, 255, 120, 0)
-                : set ? Color.argb(210, 30, 150, 60) : Color.argb(210, 230, 130, 0));
-        g.setStroke(dp(2), Color.WHITE);
+        g.setColor(markerSet(id) ? Color.argb(140, 30, 170, 70) : Color.argb(140, 240, 130, 0));
+        boolean sel = id.equals(selMarker);
+        g.setStroke(dp(sel ? 4 : 2), sel ? Color.YELLOW : Color.WHITE);
         m.setBackground(g);
     }
 
