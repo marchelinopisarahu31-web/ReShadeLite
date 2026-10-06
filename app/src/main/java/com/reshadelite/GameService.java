@@ -53,9 +53,16 @@ public class GameService extends AccessibilityService
 
     // joystick state
     private boolean active = false;
-    private float vx = 0, vy = 0;
-    private float tx, ty, lastX, lastY;
-    private GestureDescription.StrokeDescription stroke = null;
+    private float tx, ty, jLastX, jLastY;
+    private GestureDescription.StrokeDescription joyStroke = null;
+
+    // camera (look) state
+    private boolean lookDown = false;
+    private boolean lookWrap = false;
+    private float ltx, lty, lLastX, lLastY;
+    private GestureDescription.StrokeDescription lookStroke = null;
+    private Button lookBtn, sensBtn;
+
     private boolean inFlight = false;
     private int gen = 0;
 
@@ -225,9 +232,38 @@ public class GameService extends AccessibilityService
         }
     }
 
+    private boolean kw, ka, ks, kd;
+
+    /** Letter button that stays pressed while the finger is on it. */
+    private Button holdKey(final String k) {
+        final Button b = headBtn(k);
+        b.setTextSize(17);
+        b.setBackground(rounded(Color.argb(220, 60, 60, 80), 10));
+        b.setOnTouchListener((v, e) -> {
+            int a = e.getActionMasked();
+            boolean down;
+            if (a == MotionEvent.ACTION_DOWN) down = true;
+            else if (a == MotionEvent.ACTION_UP || a == MotionEvent.ACTION_CANCEL) down = false;
+            else return true;
+            b.setBackground(rounded(down ? Color.argb(240, 255, 120, 0)
+                    : Color.argb(220, 60, 60, 80), 10));
+            if (k.equals("W")) kw = down;
+            else if (k.equals("A")) ka = down;
+            else if (k.equals("S")) ks = down;
+            else kd = down;
+            float dx = (kd ? 1 : 0) - (ka ? 1 : 0);
+            float dy = (ks ? 1 : 0) - (kw ? 1 : 0);
+            float len = (float) Math.hypot(dx, dy);
+            if (len > 0) { dx /= len; dy /= len; }
+            setJoy(dx, dy);
+            return true;
+        });
+        LinearLayout.LayoutParams l = new LinearLayout.LayoutParams(dp(50), dp(46));
+        b.setLayoutParams(l);
+        return b;
+    }
+
     private void setJoy(float x, float y) {
-        vx = x;
-        vy = y;
         float mag = (float) Math.hypot(x, y);
         if (mag < 0.2f) {
             active = false;
@@ -246,52 +282,81 @@ public class GameService extends AccessibilityService
 
     // ---------------------------------------------------------------- gestures
 
-    private void pump() {
-        if (inFlight) return;
+    private GestureDescription.StrokeDescription seg(GestureDescription.StrokeDescription prev,
+            float sx, float sy, float ex, float ey, boolean cont, int dur) {
         Path p = new Path();
-        if (active) {
-            GestureDescription.StrokeDescription sd;
-            if (stroke == null) {
-                p.moveTo(joyX(), joyY());
-                p.lineTo(tx, ty);
-                sd = new GestureDescription.StrokeDescription(p, 0, 120, true);
-            } else {
-                p.moveTo(lastX, lastY);
-                p.lineTo(tx, ty);
-                sd = stroke.continueStroke(p, 0, 120, true);
-            }
-            send(sd, tx, ty, true);
-        } else if (stroke != null) {
-            p.moveTo(lastX, lastY);
-            send(stroke.continueStroke(p, 0, 50, false), lastX, lastY, false);
-        }
+        p.moveTo(sx, sy);
+        if (ex != sx || ey != sy) p.lineTo(ex, ey);
+        return prev == null
+                ? new GestureDescription.StrokeDescription(p, 0, dur, cont)
+                : prev.continueStroke(p, 0, dur, cont);
     }
 
-    private void send(GestureDescription.StrokeDescription sd, float x, float y,
-                      final boolean willContinue) {
+    /** One gesture carries the joystick finger and the camera finger together. */
+    private void pump() {
+        if (inFlight) return;
+        GestureDescription.Builder gb = new GestureDescription.Builder();
+        boolean any = false;
+        GestureDescription.StrokeDescription js = null, ls = null;
+        boolean jc = false, lc = false;
+
+        if (active) {
+            float sx = joyStroke == null ? joyX() : jLastX;
+            float sy = joyStroke == null ? joyY() : jLastY;
+            js = seg(joyStroke, sx, sy, tx, ty, true, 110);
+            jc = true;
+            jLastX = tx; jLastY = ty;
+            gb.addStroke(js);
+            any = true;
+        } else if (joyStroke != null) {
+            js = seg(joyStroke, jLastX, jLastY, jLastX, jLastY, false, 50);
+            gb.addStroke(js);
+            any = true;
+        }
+
+        if (lookDown && !lookWrap) {
+            float sx = lookStroke == null ? lookPX() : lLastX;
+            float sy = lookStroke == null ? lookPY() : lLastY;
+            ls = seg(lookStroke, sx, sy, ltx, lty, true, 110);
+            lc = true;
+            lLastX = ltx; lLastY = lty;
+            gb.addStroke(ls);
+            any = true;
+        } else if (lookStroke != null) {
+            ls = seg(lookStroke, lLastX, lLastY, lLastX, lLastY, false, 50);
+            gb.addStroke(ls);
+            any = true;
+            if (lookWrap) {
+                ltx = lookPX(); lty = lookPY();
+                lookWrap = false;
+            }
+        }
+        if (!any) return;
+
         final int my = ++gen;
-        stroke = willContinue ? sd : stroke;
+        final boolean fjc = jc, flc = lc;
+        final GestureDescription.StrokeDescription fjs = js, fls = ls;
         inFlight = true;
-        lastX = x;
-        lastY = y;
-        boolean ok = dispatchGesture(new GestureDescription.Builder().addStroke(sd).build(),
-                new GestureResultCallback() {
-                    @Override public void onCompleted(GestureDescription g) {
-                        if (my != gen) return;
-                        inFlight = false;
-                        if (!willContinue) stroke = null;
-                        pump();
-                    }
-                    @Override public void onCancelled(GestureDescription g) {
-                        if (my != gen) return;
-                        inFlight = false;
-                        stroke = null;
-                        pump();
-                    }
-                }, ui);
+        boolean ok = dispatchGesture(gb.build(), new GestureResultCallback() {
+            @Override public void onCompleted(GestureDescription g) {
+                if (my != gen) return;
+                inFlight = false;
+                if (fjs != null) joyStroke = fjc ? fjs : null;
+                if (fls != null) lookStroke = flc ? fls : null;
+                pump();
+            }
+            @Override public void onCancelled(GestureDescription g) {
+                if (my != gen) return;
+                inFlight = false;
+                joyStroke = null;
+                lookStroke = null;
+                pump();
+            }
+        }, ui);
         if (!ok) {
             inFlight = false;
-            stroke = null;
+            joyStroke = null;
+            lookStroke = null;
         }
     }
 
@@ -299,7 +364,8 @@ public class GameService extends AccessibilityService
         Path p = new Path();
         p.moveTo(x, y);
         final int my = ++gen;
-        stroke = null;
+        joyStroke = null;
+        lookStroke = null;
         inFlight = true;
         boolean ok = dispatchGesture(new GestureDescription.Builder()
                 .addStroke(new GestureDescription.StrokeDescription(p, 0, 50)).build(),
@@ -316,6 +382,40 @@ public class GameService extends AccessibilityService
                     }
                 }, ui);
         if (!ok) inFlight = false;
+    }
+
+    // ---------------------------------------------------------------- camera
+
+    private float lookPX() { return screen()[0] * prefs.getInt("lx", 70) / 100f; }
+    private float lookPY() { return screen()[1] * prefs.getInt("ly", 50) / 100f; }
+    private boolean lookMode() { return prefs.getBoolean("look", true); }
+    private int sens() { return prefs.getInt("sens", 4); }
+
+    private void lookStart() {
+        lookDown = true;
+        lookWrap = false;
+        ltx = lookPX();
+        lty = lookPY();
+    }
+
+    private void lookMove(float dx, float dy) {
+        int[] s = screen();
+        float gain = sens() * 0.6f;
+        ltx += dx * gain;
+        lty += dy * gain;
+        float mx = s[0] * 0.03f, my = s[1] * 0.03f;
+        if (ltx < mx || ltx > s[0] - mx || lty < my || lty > s[1] - my) {
+            ltx = Math.max(mx, Math.min(s[0] - mx, ltx));
+            lty = Math.max(my, Math.min(s[1] - my, lty));
+            lookWrap = true;
+        }
+        pump();
+    }
+
+    private void lookEnd() {
+        lookDown = false;
+        lookWrap = false;
+        pump();
     }
 
     // ---------------------------------------------------------------- panel
@@ -350,7 +450,23 @@ public class GameService extends AccessibilityService
         head.addView(drag);
         head.addView(setBtn);
         head.addView(editBtn);
+        lookBtn = headBtn(lookMode() ? "\uD83D\uDC41" : "\uD83D\uDDB1");
+        sensBtn = headBtn("S" + sens());
+        head.addView(lookBtn);
+        head.addView(sensBtn);
         panel.addView(head);
+        lookBtn.setOnClickListener(v -> {
+            boolean m = !lookMode();
+            prefs.edit().putBoolean("look", m).apply();
+            lookBtn.setText(m ? "\uD83D\uDC41" : "\uD83D\uDDB1");
+            Toast.makeText(this, m ? "Mode kamera: geser touchpad = putar layar game"
+                    : "Mode kursor: geser = gerak kursor, tap = klik", Toast.LENGTH_SHORT).show();
+        });
+        sensBtn.setOnClickListener(v -> {
+            int n = sens() % 10 + 1;
+            prefs.edit().putInt("sens", n).apply();
+            sensBtn.setText("S" + n);
+        });
 
         final float[] down = new float[4];
         drag.setOnTouchListener((v, e) -> {
@@ -373,10 +489,22 @@ public class GameService extends AccessibilityService
         body.setOrientation(LinearLayout.HORIZONTAL);
         body.setGravity(Gravity.CENTER_VERTICAL);
 
-        JoyPad joy = new JoyPad();
-        LinearLayout.LayoutParams jl = new LinearLayout.LayoutParams(dp(110), dp(110));
-        jl.topMargin = dp(6);
-        body.addView(joy, jl);
+        LinearLayout wasd = new LinearLayout(this);
+        wasd.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout r1 = new LinearLayout(this);
+        LinearLayout r2 = new LinearLayout(this);
+        r1.setOrientation(LinearLayout.HORIZONTAL);
+        r2.setOrientation(LinearLayout.HORIZONTAL);
+        View sp = new View(this);
+        r1.addView(sp, new LinearLayout.LayoutParams(dp(50), dp(46)));
+        r1.addView(holdKey("W"));
+        r2.addView(holdKey("A"));
+        r2.addView(holdKey("S"));
+        r2.addView(holdKey("D"));
+        wasd.addView(r1);
+        wasd.addView(r2);
+        wasd.setPadding(0, dp(6), 0, 0);
+        body.addView(wasd);
 
         keysBox = new LinearLayout(this);
         keysBox.setOrientation(LinearLayout.VERTICAL);
@@ -390,20 +518,27 @@ public class GameService extends AccessibilityService
         final long[] downT = new long[1];
         final float[] moved = new float[1];
         pad.setOnTouchListener((v, e) -> {
+            boolean look = lookMode();
             switch (e.getActionMasked()) {
                 case MotionEvent.ACTION_DOWN:
                     last[0] = e.getRawX(); last[1] = e.getRawY();
                     downT[0] = System.currentTimeMillis();
                     moved[0] = 0;
+                    if (look) lookStart();
                     break;
                 case MotionEvent.ACTION_MOVE:
                     float dx = e.getRawX() - last[0], dy = e.getRawY() - last[1];
                     moved[0] += Math.abs(dx) + Math.abs(dy);
                     last[0] = e.getRawX(); last[1] = e.getRawY();
-                    moveCursor(cx + dx * 2.2f, cy + dy * 2.2f);
+                    if (look) lookMove(dx, dy);
+                    else moveCursor(cx + dx * 2.2f, cy + dy * 2.2f);
                     break;
                 case MotionEvent.ACTION_UP:
-                    if (moved[0] < dp(8) && System.currentTimeMillis() - downT[0] < 300) {
+                case MotionEvent.ACTION_CANCEL:
+                    if (look) {
+                        lookEnd();
+                    } else if (e.getActionMasked() == MotionEvent.ACTION_UP
+                            && moved[0] < dp(8) && System.currentTimeMillis() - downT[0] < 300) {
                         tapAt(cx, cy);
                     }
                     break;
@@ -411,7 +546,7 @@ public class GameService extends AccessibilityService
             }
             return true;
         });
-        LinearLayout.LayoutParams pl = new LinearLayout.LayoutParams(dp(100), dp(80));
+        LinearLayout.LayoutParams pl = new LinearLayout.LayoutParams(dp(120), dp(96));
         pl.topMargin = dp(6);
         body.addView(pad, pl);
 
@@ -486,7 +621,7 @@ public class GameService extends AccessibilityService
         picker.setPadding(dp(10), dp(10), dp(10), dp(10));
         picker.setBackground(rounded(Color.argb(235, 20, 20, 28), 14));
         TextView t = new TextView(this);
-        t.setText("Pilih huruf (WASD sudah jadi joystick)");
+        t.setText("Pilih huruf tambahan");
         t.setTextColor(Color.WHITE);
         picker.addView(t);
         final List<String> sel = selected();
@@ -562,6 +697,7 @@ public class GameService extends AccessibilityService
     private void showMarkers() {
         hideMarkers();
         addMarker("JOY");
+        addMarker("LOOK");
         int i = 0;
         for (String k : selected()) addMarker(k, i++);
     }
@@ -569,12 +705,15 @@ public class GameService extends AccessibilityService
     private void addMarker(String id) { addMarker(id, 0); }
 
     private void addMarker(final String id, int order) {
-        final boolean joy = "JOY".equals(id);
+        final boolean look = "LOOK".equals(id);
+        final boolean joy = "JOY".equals(id) || look;
         final int size = dp(joy ? 64 : 52);
         final int[] s = screen();
         float px, py;
         boolean set;
-        if (joy) {
+        if (look) {
+            px = lookPX(); py = lookPY(); set = true;
+        } else if (joy) {
             px = joyX(); py = joyY(); set = true;
         } else if (isSet(id)) {
             px = s[0] * prefs.getInt("kx_" + id, 0) / 1000f;
@@ -589,8 +728,8 @@ public class GameService extends AccessibilityService
         m.setGravity(Gravity.CENTER);
         m.setTextColor(Color.WHITE);
         m.setTextSize(joy ? 18 : 16);
-        m.setText(joy ? JOY : ("E".equals(id) ? HAND + "E" : id));
-        markerBg(m, joy ? true : set, joy);
+        m.setText(look ? "\uD83D\uDC41" : joy ? JOY : ("E".equals(id) ? HAND + "E" : id));
+        markerBg(m, joy || set, joy);
 
         final WindowManager.LayoutParams l = lp(true);
         l.width = size;
@@ -633,7 +772,10 @@ public class GameService extends AccessibilityService
 
     private void saveMarker(String id, float x, float y) {
         int[] s = screen();
-        if ("JOY".equals(id)) {
+        if ("LOOK".equals(id)) {
+            prefs.edit().putInt("lx", Math.round(x * 100f / s[0]))
+                    .putInt("ly", Math.round(y * 100f / s[1])).apply();
+        } else if ("JOY".equals(id)) {
             prefs.edit().putInt("jx", Math.round(x * 100f / s[0]))
                     .putInt("jy", Math.round(y * 100f / s[1])).apply();
         } else {
