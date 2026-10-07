@@ -95,23 +95,50 @@ public class MainActivity extends Activity {
         root.addView(slider("Hangat / Dingin", "warmth", -100, 100, 0));
         root.addView(slider("Kekuatan warna tint", "tint", 0, 100, 0));
         root.addView(slider("Vignette", "vignette", 0, 100, 0));
-Button accBtn = new Button(this);
+
+        // ---- Game pad (Accessibility) ----
+        Button accBtn = new Button(this);
         accBtn.setText("1) Aktifkan layanan Game Pad (Aksesibilitas)");
         accBtn.setAllCaps(false);
-        accBtn.setOnClickListener(v -> startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)));
-        root.addView(accBtn);
+        accBtn.setOnClickListener(v ->
+                startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)));
+        LinearLayout.LayoutParams alp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        alp.topMargin = dp(20);
+        root.addView(accBtn, alp);
 
         Switch padSw = new Switch(this);
         padSw.setText("2) Tampilkan game pad");
         padSw.setTextColor(Color.WHITE);
-        padSw.setChecked(prefs.getBoolean("pad", true));
+        padSw.setTextSize(16);
+        padSw.setPadding(0, pad, 0, pad);
+        padSw.setChecked(prefs.getBoolean("pad", false));
         padSw.setOnCheckedChangeListener((v, on) -> prefs.edit().putBoolean("pad", on).apply());
         root.addView(padSw);
 
+        // ---- E button only (no keyboard) ----
+        Switch eSw = new Switch(this);
+        eSw.setText("3) Tombol E saja di lingkaran bidik (tanpa keyboard)");
+        eSw.setTextColor(Color.WHITE);
+        eSw.setTextSize(16);
+        eSw.setPadding(0, pad, 0, pad);
+        eSw.setChecked(prefs.getBoolean("eonly", false));
+        eSw.setOnCheckedChangeListener((v, on) -> prefs.edit().putBoolean("eonly", on).apply());
+        root.addView(eSw);
+
+        Button eEdit = new Button(this);
+        eEdit.setText("Atur posisi tombol E");
+        eEdit.setAllCaps(false);
+        eEdit.setOnClickListener(v -> {
+            prefs.edit().putBoolean("eedit", true).apply();
+            Toast.makeText(this, "Buka Granny. Geser tanda ke tombol tangan dan ke lingkaran bidik, lalu tekan Selesai",
+                    Toast.LENGTH_LONG).show();
+        });
+        root.addView(eEdit);
+
         root.addView(slider("Joystick game - X (%)", "jx", 0, 100, 15));
         root.addView(slider("Joystick game - Y (%)", "jy", 0, 100, 70));
-        root.addView(slider("Tombol E di game - X (%)", "ex", 0, 100, 85));
-        root.addView(slider("Tombol E di game - Y (%)", "ey", 0, 100, 60));
+
         root.addView(text("Warna tint", 16, Color.WHITE));
         LinearLayout colors = new LinearLayout(this);
         int[] swatches = {0xFFFF5078, 0xFFFF9800, 0xFFFFEB3B, 0xFF4CAF50,
@@ -193,4 +220,4 @@ Button accBtn = new Button(this);
     private int dp(int v) {
         return Math.round(v * getResources().getDisplayMetrics().density);
     }
-                                          }
+}
