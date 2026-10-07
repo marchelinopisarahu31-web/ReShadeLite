@@ -81,6 +81,7 @@ public class GameService extends AccessibilityService
         wm = (WindowManager) getSystemService(WINDOW_SERVICE);
         prefs = getSharedPreferences(OverlayService.PREFS, MODE_PRIVATE);
         prefs.registerOnSharedPreferenceChangeListener(this);
+        prefs.edit().putBoolean("eedit", false).apply();
         cursorSize = dp(22);
         buildCursor();
         buildPanel();
@@ -106,7 +107,8 @@ public class GameService extends AccessibilityService
         cx = s[0] / 2f;
         cy = s[1] / 2f;
         moveCursor(cx, cy);
-        if (editMode) { hideMarkers(); showMarkers(); }
+        if (eEditOn) { hideMarkers(); addMarker("E", 0); addMarker("CROSS"); }
+        else if (editMode) { hideMarkers(); showMarkers(); }
         else if (eBubble != null && eBubble.isAttachedToWindow()) {
             buildEBubble();
             wm.addView(eBubble, eLp);
@@ -116,9 +118,11 @@ public class GameService extends AccessibilityService
 
     @Override
     public void onSharedPreferenceChanged(SharedPreferences p, String key) {
-        if ("pad".equals(key)) {
+        if ("pad".equals(key) || "eonly".equals(key)) {
             applyVisibility();
             ui.postDelayed(this::resetPositions, 200);
+        } else if ("eedit".equals(key)) {
+            if (prefs.getBoolean("eedit", false)) enterEEdit(); else exitEEdit();
         }
     }
 
@@ -130,6 +134,7 @@ public class GameService extends AccessibilityService
         removeView(panel);
         removeView(cursor);
         polling = false;
+        removeView(eBar);
         removeView(eBubble);
         super.onDestroy();
     }
@@ -232,7 +237,8 @@ public class GameService extends AccessibilityService
     private final Runnable pollRunnable = new Runnable() {
         @Override public void run() {
             if (!polling) return;
-            boolean wanted = prefs.getBoolean("pad", false) && !editMode
+            boolean wanted = (prefs.getBoolean("pad", false) || prefs.getBoolean("eonly", false))
+                    && !editMode && !eEditOn
                     && prefs.getBoolean("auto", true) && shotFails < 3;
             if (!wanted) {
                 polling = false;
@@ -946,21 +952,69 @@ public class GameService extends AccessibilityService
     }
 
     private void applyVisibility() {
-        boolean show = prefs.getBoolean("pad", false);
-        if (show) {
+        boolean pad = prefs.getBoolean("pad", false);
+        boolean eo = prefs.getBoolean("eonly", false);
+        if (pad) {
             if (!panel.isAttachedToWindow()) wm.addView(panel, panelLp);
             if (!cursor.isAttachedToWindow()) wm.addView(cursor, cursorLp);
-            if (!editMode && !eBubble.isAttachedToWindow()) wm.addView(eBubble, eLp);
-            startPolling();
         } else {
-            hideMarkers();
+            if (!eEditOn) hideMarkers();
             editMode = false;
-            if (editBtn != null) editBtn.setText("✎");
+            if (editBtn != null) editBtn.setText("\u270E");
             removeView(picker);
             removeView(panel);
             removeView(cursor);
+        }
+        if ((pad || eo) && !editMode && !eEditOn) {
+            if (!eBubble.isAttachedToWindow()) wm.addView(eBubble, eLp);
+            startPolling();
+        } else {
             removeView(eBubble);
         }
+    }
+
+    // ---------------------------------------------------------------- "E only" mode (no keyboard)
+
+    private boolean eEditOn = false;
+    private LinearLayout eBar;
+    private WindowManager.LayoutParams eBarLp;
+
+    private void enterEEdit() {
+        if (eEditOn || wm == null) return;
+        eEditOn = true;
+        removeView(eBubble);
+        hideMarkers();
+        addMarker("E", 0);
+        addMarker("CROSS");
+        eBar = new LinearLayout(this);
+        eBar.setOrientation(LinearLayout.HORIZONTAL);
+        eBar.setPadding(dp(6), dp(6), dp(6), dp(6));
+        eBar.setBackground(rounded(Color.argb(200, 0, 0, 0), 12));
+        Button m = headBtn("Tanda \u2212");
+        Button pl = headBtn("Tanda +");
+        Button ok = headBtn("\u2714 Selesai");
+        m.setOnClickListener(v -> resizeMarker(-6));
+        pl.setOnClickListener(v -> resizeMarker(6));
+        ok.setOnClickListener(v -> prefs.edit().putBoolean("eedit", false).apply());
+        eBar.addView(m);
+        eBar.addView(pl);
+        eBar.addView(ok);
+        eBarLp = lp(true);
+        eBarLp.gravity = Gravity.TOP | Gravity.CENTER_HORIZONTAL;
+        eBarLp.y = dp(12);
+        wm.addView(eBar, eBarLp);
+        Toast.makeText(this, "Geser \uD83D\uDD90E ke tombol tangan game, dan CROSS ke lingkaran bidik. Lalu tekan Selesai",
+                Toast.LENGTH_LONG).show();
+    }
+
+    private void exitEEdit() {
+        if (!eEditOn) return;
+        eEditOn = false;
+        hideMarkers();
+        removeView(eBar);
+        buildEBubble();
+        applyVisibility();
+        rebuildKeys();
     }
 
     private void hideMarkers() {
