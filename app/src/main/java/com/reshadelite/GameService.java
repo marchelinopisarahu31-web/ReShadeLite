@@ -4,16 +4,20 @@ import android.accessibilityservice.AccessibilityService;
 import android.accessibilityservice.GestureDescription;
 import android.content.SharedPreferences;
 import android.content.res.Configuration;
+import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.PixelFormat;
 import android.graphics.Path;
 import android.graphics.drawable.GradientDrawable;
+import android.hardware.HardwareBuffer;
+import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.DisplayMetrics;
 import android.view.Gravity;
+import android.view.Display;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.WindowManager;
@@ -80,6 +84,7 @@ public class GameService extends AccessibilityService
         cursorSize = dp(22);
         buildCursor();
         buildPanel();
+        buildEBubble();
         applyVisibility();
     }
 
@@ -102,6 +107,11 @@ public class GameService extends AccessibilityService
         cy = s[1] / 2f;
         moveCursor(cx, cy);
         if (editMode) { hideMarkers(); showMarkers(); }
+        else if (eBubble != null && eBubble.isAttachedToWindow()) {
+            buildEBubble();
+            wm.addView(eBubble, eLp);
+            startPolling();
+        }
     }
 
     @Override
@@ -119,6 +129,8 @@ public class GameService extends AccessibilityService
         removeView(picker);
         removeView(panel);
         removeView(cursor);
+        polling = false;
+        removeView(eBubble);
         super.onDestroy();
     }
 
@@ -163,6 +175,140 @@ public class GameService extends AccessibilityService
         DisplayMetrics m = new DisplayMetrics();
         wm.getDefaultDisplay().getRealMetrics(m);
         return new int[]{m.widthPixels, m.heightPixels};
+    }
+
+    // ---------------------------------------------------------------- E bubble (at the crosshair)
+
+    private TextView eBubble;
+    private WindowManager.LayoutParams eLp;
+
+    private void buildEBubble() {
+        removeView(eBubble);
+        int sizeDp = prefs.getInt("sz_CROSS", 44);
+        int sz = dp(sizeDp);
+        int[] sc = screen();
+        eBubble = new TextView(this);
+        eBubble.setGravity(Gravity.CENTER);
+        eBubble.setText("E");
+        eBubble.setTextColor(Color.WHITE);
+        eBubble.setTextSize(sizeDp * 0.4f);
+        GradientDrawable g = new GradientDrawable();
+        g.setShape(GradientDrawable.OVAL);
+        g.setColor(Color.argb(70, 0, 0, 0));
+        g.setStroke(dp(2), Color.argb(230, 255, 255, 255));
+        eBubble.setBackground(g);
+        eBubble.setOnClickListener(v -> tapE());
+        eBubble.setVisibility(bubbleOn ? View.VISIBLE : View.INVISIBLE);
+        eLp = lp(true);
+        eLp.width = sz;
+        eLp.height = sz;
+        eLp.x = (int) (sc[0] * prefs.getInt("bx", 50) / 100f) - sz / 2;
+        eLp.y = (int) (sc[1] * prefs.getInt("by", 50) / 100f) - sz / 2;
+    }
+
+    private void tapE() {
+        if (!isSet("E")) {
+            Toast.makeText(this, "Tombol E belum diatur. Tekan \u270E lalu geser \uD83D\uDD90E ke tombol tangan game",
+                    Toast.LENGTH_LONG).show();
+            return;
+        }
+        int[] s = screen();
+        tapAt(s[0] * prefs.getInt("kx_E", 0) / 1000f, s[1] * prefs.getInt("ky_E", 0) / 1000f);
+    }
+
+    // ---------------------------------------------------------------- auto-detect aim ring
+
+    private boolean bubbleOn = true;
+    private int shotFails = 0;
+    private int missCount = 0;
+    private boolean polling = false;
+
+    private void startPolling() {
+        if (polling || Build.VERSION.SDK_INT < 30 || !prefs.getBoolean("auto", true)) return;
+        polling = true;
+        ui.postDelayed(pollRunnable, 600);
+    }
+
+    private final Runnable pollRunnable = new Runnable() {
+        @Override public void run() {
+            if (!polling) return;
+            boolean wanted = prefs.getBoolean("pad", false) && !editMode
+                    && prefs.getBoolean("auto", true) && shotFails < 3;
+            if (!wanted) {
+                polling = false;
+                if (shotFails >= 3) setBubbleShown(true);
+                return;
+            }
+            takeShot();
+            ui.postDelayed(this, 450);
+        }
+    };
+
+    private void setBubbleShown(boolean on) {
+        bubbleOn = on;
+        if (eBubble != null) eBubble.setVisibility(on ? View.VISIBLE : View.INVISIBLE);
+    }
+
+    private void takeShot() {
+        if (Build.VERSION.SDK_INT < 30) return;
+        try {
+            takeScreenshot(Display.DEFAULT_DISPLAY, getMainExecutor(), new TakeScreenshotCallback() {
+                @Override public void onSuccess(ScreenshotResult r) {
+                    try {
+                        HardwareBuffer hb = r.getHardwareBuffer();
+                        Bitmap hw = Bitmap.wrapHardwareBuffer(hb, r.getColorSpace());
+                        if (hw != null) {
+                            Bitmap soft = hw.copy(Bitmap.Config.ARGB_8888, false);
+                            if (soft != null) {
+                                float ratio = ringRatio(soft);
+                                soft.recycle();
+                                shotFails = 0;
+                                if (ratio >= 0.65f) { missCount = 0; setBubbleShown(true); }
+                                else if (ratio < 0.4f && ++missCount >= 2) setBubbleShown(false);
+                            }
+                        }
+                        hb.close();
+                    } catch (Throwable t) {
+                        shotFails++;
+                    }
+                }
+                @Override public void onFailure(int code) {
+                    // 3 = interval too short: just try again later
+                    if (code != 3) shotFails++;
+                    if (shotFails >= 3) {
+                        setBubbleShown(true);
+                        Toast.makeText(GameService.this, "Deteksi otomatis tidak tersedia, tombol E tampil terus",
+                                Toast.LENGTH_LONG).show();
+                    }
+                }
+            });
+        } catch (Throwable t) {
+            shotFails++;
+        }
+    }
+
+    /** Fraction (0..1) of points on the game's aim ring (centre of screen) that are bright white. */
+    private float ringRatio(Bitmap b) {
+        int w = b.getWidth(), h = b.getHeight();
+        float cx0 = w / 2f, cy0 = h / 2f;
+        float r = h * 0.020f;
+        int tol = Math.max(2, Math.round(h * 0.004f));
+        int n = 24, hit = 0;
+        for (int i = 0; i < n; i++) {
+            double a = 2 * Math.PI * i / n;
+            boolean bright = false;
+            for (int d = -tol; d <= tol && !bright; d++) {
+                int x = (int) Math.round(cx0 + Math.cos(a) * (r + d));
+                int y = (int) Math.round(cy0 + Math.sin(a) * (r + d));
+                x = Math.max(0, Math.min(w - 1, x));
+                y = Math.max(0, Math.min(h - 1, y));
+                int px = b.getPixel(x, y);
+                int lum = (Color.red(px) * 299 + Color.green(px) * 587 + Color.blue(px) * 114) / 1000;
+                if (lum > 200) bright = true;
+            }
+            if (bright) hit++;
+        }
+        return hit / (float) n;
     }
 
     // ---------------------------------------------------------------- cursor
@@ -365,6 +511,8 @@ public class GameService extends AccessibilityService
                 lookWrap = false;
             }
         }
+        final boolean hadTap = hasTap;
+        final float htx = tapX, hty = tapY;
         if (hasTap) {
             Path tp = new Path();
             tp.moveTo(tapX, tapY);
@@ -384,6 +532,8 @@ public class GameService extends AccessibilityService
                 inFlight = false;
                 if (fjs != null) joyStroke = fjc ? fjs : null;
                 if (fls != null) lookStroke = flc ? fls : null;
+                if (hadTap) Toast.makeText(GameService.this, "Tap terkirim ("
+                        + Math.round(htx) + "," + Math.round(hty) + ")", Toast.LENGTH_SHORT).show();
                 pump();
             }
             @Override public void onCancelled(GestureDescription g) {
@@ -391,8 +541,17 @@ public class GameService extends AccessibilityService
                 inFlight = false;
                 joyStroke = null;
                 lookStroke = null;
-                warn("Gerakan dibatalkan sistem");
-                ui.postDelayed(() -> pump(), 150);
+                if (hadTap && tapRetries > 0) {
+                    tapRetries--;
+                    tapX = htx; tapY = hty;
+                    hasTap = true;
+                } else if (hadTap) {
+                    Toast.makeText(GameService.this, "Tap dibatalkan sistem. Jangan sentuh layar lain saat menekan.",
+                            Toast.LENGTH_SHORT).show();
+                } else {
+                    warn("Gerakan dibatalkan sistem");
+                }
+                ui.postDelayed(() -> pump(), 120);
             }
         }, ui);
         if (!ok) {
@@ -423,6 +582,7 @@ public class GameService extends AccessibilityService
     }
 
     private boolean hasTap = false;
+    private int tapRetries = 0;
     private float tapX, tapY;
 
     /** A tap rides along in the same gesture as the held joystick, so walking is not cut. */
@@ -430,6 +590,7 @@ public class GameService extends AccessibilityService
         tapX = x;
         tapY = y;
         hasTap = true;
+        tapRetries = 3;
         pump();
     }
 
@@ -736,12 +897,16 @@ public class GameService extends AccessibilityService
         sizeRow.setVisibility(editMode ? View.VISIBLE : View.GONE);
         selMarker = null;
         if (editMode) {
+            removeView(eBubble);
             showMarkers();
             Toast.makeText(this, "Geser tanda ke tombol game. Ketuk tanda lalu Tanda -/+ untuk ukuran. Selesai: ✔",
                     Toast.LENGTH_LONG).show();
         } else {
             hideMarkers();
             rebuildKeys();
+            buildEBubble();
+            wm.addView(eBubble, eLp);
+            startPolling();
         }
     }
 
@@ -767,7 +932,8 @@ public class GameService extends AccessibilityService
             return;
         }
         boolean j = "JOY".equals(selMarker) || "LOOK".equals(selMarker);
-        int cur = prefs.getInt("sz_" + selMarker, j ? 64 : 52);
+        int cur = prefs.getInt("sz_" + selMarker,
+                "CROSS".equals(selMarker) ? 44 : j ? 64 : 52);
         int n = Math.max(28, Math.min(160, cur + deltaDp));
         float centerX = l.x + l.width / 2f, centerY = l.y + l.height / 2f;
         l.width = dp(n);
@@ -784,6 +950,8 @@ public class GameService extends AccessibilityService
         if (show) {
             if (!panel.isAttachedToWindow()) wm.addView(panel, panelLp);
             if (!cursor.isAttachedToWindow()) wm.addView(cursor, cursorLp);
+            if (!editMode && !eBubble.isAttachedToWindow()) wm.addView(eBubble, eLp);
+            startPolling();
         } else {
             hideMarkers();
             editMode = false;
@@ -791,6 +959,7 @@ public class GameService extends AccessibilityService
             removeView(picker);
             removeView(panel);
             removeView(cursor);
+            removeView(eBubble);
         }
     }
 
@@ -805,6 +974,7 @@ public class GameService extends AccessibilityService
         hideMarkers();
         addMarker("JOY");
         addMarker("LOOK");
+        addMarker("CROSS");
         int i = 0;
         for (String k : selected()) addMarker(k, i++);
     }
@@ -814,6 +984,7 @@ public class GameService extends AccessibilityService
     private boolean markerSet(String id) {
         if ("JOY".equals(id)) return prefs.contains("jx");
         if ("LOOK".equals(id)) return prefs.contains("lx");
+        if ("CROSS".equals(id)) return prefs.contains("bx");
         return isSet(id);
     }
 
@@ -826,12 +997,16 @@ public class GameService extends AccessibilityService
 
     private void addMarker(final String id, int order) {
         final boolean look = "LOOK".equals(id);
-        final boolean joy = "JOY".equals(id) || look;
-        final int sizeDp = prefs.getInt("sz_" + id, joy ? 64 : 52);
+        final boolean cross = "CROSS".equals(id);
+        final boolean joy = "JOY".equals(id) || look || cross;
+        final int sizeDp = prefs.getInt("sz_" + id, cross ? 44 : joy ? 64 : 52);
         final int size = dp(sizeDp);
         final int[] s = screen();
         float px, py;
-        if (look) {
+        if (cross) {
+            px = s[0] * prefs.getInt("bx", 50) / 100f;
+            py = s[1] * prefs.getInt("by", 50) / 100f;
+        } else if (look) {
             px = lookPX(); py = lookPY();
         } else if (joy) {
             px = joyX(); py = joyY();
@@ -846,7 +1021,7 @@ public class GameService extends AccessibilityService
         m.setGravity(Gravity.CENTER);
         m.setTextColor(Color.WHITE);
         m.setTextSize(sizeDp * 0.3f);
-        m.setText(look ? "\uD83D\uDC41" : joy ? JOY : ("E".equals(id) ? HAND + "E" : id));
+        m.setText(cross ? "E" : look ? "\uD83D\uDC41" : joy ? JOY : ("E".equals(id) ? HAND + "E" : id));
 
         final WindowManager.LayoutParams l = lp(true);
         l.width = size;
@@ -897,7 +1072,10 @@ public class GameService extends AccessibilityService
 
     private void saveMarker(String id, float x, float y) {
         int[] s = screen();
-        if ("LOOK".equals(id)) {
+        if ("CROSS".equals(id)) {
+            prefs.edit().putInt("bx", Math.round(x * 100f / s[0]))
+                    .putInt("by", Math.round(y * 100f / s[1])).apply();
+        } else if ("LOOK".equals(id)) {
             prefs.edit().putInt("lx", Math.round(x * 100f / s[0]))
                     .putInt("ly", Math.round(y * 100f / s[1])).apply();
         } else if ("JOY".equals(id)) {
