@@ -136,6 +136,28 @@ public class MainActivity extends Activity {
         });
         root.addView(eEdit);
 
+        // ---- touch sound ----
+        Switch sndSw = new Switch(this);
+        sndSw.setText("4) Suara ketikan saat sentuh layar");
+        sndSw.setTextColor(Color.WHITE);
+        sndSw.setTextSize(16);
+        sndSw.setPadding(0, pad, 0, pad);
+        sndSw.setChecked(prefs.getBoolean("tapsound", false));
+        sndSw.setOnCheckedChangeListener((v, on) -> prefs.edit().putBoolean("tapsound", on).apply());
+        root.addView(sndSw);
+
+        final String[] styles = {"Thock (dalam)", "Klik (nyaring)", "Lembut"};
+        final Button styleBtn = new Button(this);
+        styleBtn.setAllCaps(false);
+        styleBtn.setText("Gaya suara: " + styles[prefs.getInt("snd_style", 0) % 3]);
+        styleBtn.setOnClickListener(v -> {
+            int n = (prefs.getInt("snd_style", 0) + 1) % 3;
+            prefs.edit().putInt("snd_style", n).apply();
+            styleBtn.setText("Gaya suara: " + styles[n]);
+        });
+        root.addView(styleBtn);
+        root.addView(slider("Volume suara sentuh", "tapvol", 0, 100, 60));
+
         root.addView(slider("Joystick game - X (%)", "jx", 0, 100, 15));
         root.addView(slider("Joystick game - Y (%)", "jy", 0, 100, 70));
 
