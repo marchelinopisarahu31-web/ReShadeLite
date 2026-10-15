@@ -146,17 +146,17 @@ public class MainActivity extends Activity {
         sndSw.setOnCheckedChangeListener((v, on) -> prefs.edit().putBoolean("tapsound", on).apply());
         root.addView(sndSw);
 
-        final String[] styles = {"Thock (dalam)", "Klik (nyaring)", "Lembut"};
+        final String[] styles = {"Thock (dalam)", "Klik (nyaring)", "Lembut", "Asli (dari video)"};
         final Button styleBtn = new Button(this);
         styleBtn.setAllCaps(false);
-        styleBtn.setText("Gaya suara: " + styles[prefs.getInt("snd_style", 0) % 3]);
+        styleBtn.setText("Gaya suara: " + styles[prefs.getInt("snd_style", 3) % 4]);
         styleBtn.setOnClickListener(v -> {
-            int n = (prefs.getInt("snd_style", 0) + 1) % 3;
+            int n = (prefs.getInt("snd_style", 3) + 1) % 4;
             prefs.edit().putInt("snd_style", n).apply();
             styleBtn.setText("Gaya suara: " + styles[n]);
         });
         root.addView(styleBtn);
-        root.addView(slider("Volume suara sentuh", "tapvol", 0, 100, 60));
+        root.addView(slider("Volume suara sentuh", "tapvol", 0, 100, 100));
 
         root.addView(slider("Joystick game - X (%)", "jx", 0, 100, 15));
         root.addView(slider("Joystick game - Y (%)", "jy", 0, 100, 70));
