@@ -5,6 +5,9 @@ import android.accessibilityservice.GestureDescription;
 import android.content.SharedPreferences;
 import android.content.res.Configuration;
 import android.graphics.Bitmap;
+import android.media.AudioAttributes;
+import android.media.AudioFormat;
+import android.media.AudioTrack;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
@@ -87,6 +90,7 @@ public class GameService extends AccessibilityService
         buildPanel();
         buildEBubble();
         applyVisibility();
+        applyTapSound();
     }
 
     @Override public void onAccessibilityEvent(AccessibilityEvent e) { }
@@ -118,6 +122,14 @@ public class GameService extends AccessibilityService
 
     @Override
     public void onSharedPreferenceChanged(SharedPreferences p, String key) {
+        if ("tapsound".equals(key)) { applyTapSound(); return; }
+        if ("snd_style".equals(key) || "tapvol".equals(key)) {
+            if (touchWatch != null) {
+                if ("snd_style".equals(key)) buildSounds();
+                playClick(true);
+            }
+            return;
+        }
         if ("pad".equals(key) || "eonly".equals(key)) {
             applyVisibility();
             ui.postDelayed(this::resetPositions, 200);
@@ -134,6 +146,8 @@ public class GameService extends AccessibilityService
         removeView(panel);
         removeView(cursor);
         polling = false;
+        removeView(touchWatch);
+        for (AudioTrack t : clicks) { if (t != null) t.release(); }
         removeView(eBar);
         removeView(eBubble);
         super.onDestroy();
@@ -221,17 +235,19 @@ public class GameService extends AccessibilityService
         tapAt(s[0] * prefs.getInt("kx_E", 0) / 1000f, s[1] * prefs.getInt("ky_E", 0) / 1000f);
     }
 
-    // ---------------------------------------------------------------- auto-detect aim ring
+    // ---------------------------------------------------------------- auto-detect: item can be picked up
 
     private boolean bubbleOn = true;
     private int shotFails = 0;
-    private int missCount = 0;
     private boolean polling = false;
+    private long lastShot = 0;
+    private final java.util.concurrent.Executor bgExec =
+            java.util.concurrent.Executors.newSingleThreadExecutor();
 
     private void startPolling() {
         if (polling || Build.VERSION.SDK_INT < 30 || !prefs.getBoolean("auto", true)) return;
         polling = true;
-        ui.postDelayed(pollRunnable, 600);
+        ui.postDelayed(pollRunnable, 300);
     }
 
     private final Runnable pollRunnable = new Runnable() {
@@ -245,10 +261,17 @@ public class GameService extends AccessibilityService
                 if (shotFails >= 3) setBubbleShown(true);
                 return;
             }
+            lastShot = System.currentTimeMillis();
             takeShot();
-            ui.postDelayed(this, 450);
         }
     };
+
+    /** Next check as soon as the system allows (it needs ~0.35 s between screenshots). */
+    private void scheduleNext() {
+        if (!polling) return;
+        long wait = Math.max(20, 360 - (System.currentTimeMillis() - lastShot));
+        ui.postDelayed(pollRunnable, wait);
+    }
 
     private void setBubbleShown(boolean on) {
         bubbleOn = on;
@@ -258,7 +281,7 @@ public class GameService extends AccessibilityService
     private void takeShot() {
         if (Build.VERSION.SDK_INT < 30) return;
         try {
-            takeScreenshot(Display.DEFAULT_DISPLAY, getMainExecutor(), new TakeScreenshotCallback() {
+            takeScreenshot(Display.DEFAULT_DISPLAY, bgExec, new TakeScreenshotCallback() {
                 @Override public void onSuccess(ScreenshotResult r) {
                     try {
                         HardwareBuffer hb = r.getHardwareBuffer();
@@ -266,55 +289,199 @@ public class GameService extends AccessibilityService
                         if (hw != null) {
                             Bitmap soft = hw.copy(Bitmap.Config.ARGB_8888, false);
                             if (soft != null) {
-                                float ratio = ringRatio(soft);
+                                final boolean present = itemReachable(soft);
                                 soft.recycle();
                                 shotFails = 0;
-                                if (ratio >= 0.65f) { missCount = 0; setBubbleShown(true); }
-                                else if (ratio < 0.4f && ++missCount >= 2) setBubbleShown(false);
+                                ui.post(() -> setBubbleShown(present));
                             }
                         }
                         hb.close();
                     } catch (Throwable t) {
                         shotFails++;
                     }
+                    ui.post(() -> scheduleNext());
                 }
                 @Override public void onFailure(int code) {
-                    // 3 = interval too short: just try again later
+                    // 3 = interval too short: just try again
                     if (code != 3) shotFails++;
-                    if (shotFails >= 3) {
-                        setBubbleShown(true);
-                        Toast.makeText(GameService.this, "Deteksi otomatis tidak tersedia, tombol E tampil terus",
-                                Toast.LENGTH_LONG).show();
-                    }
+                    ui.post(() -> {
+                        if (shotFails >= 3) {
+                            setBubbleShown(true);
+                            Toast.makeText(GameService.this,
+                                    "Deteksi otomatis tidak tersedia, tombol E tampil terus",
+                                    Toast.LENGTH_LONG).show();
+                        }
+                        scheduleNext();
+                    });
                 }
             });
         } catch (Throwable t) {
             shotFails++;
+            ui.post(() -> scheduleNext());
         }
+    }
+
+    /**
+     * True when the game shows its pickup (hand) button: it is only on screen while an item is
+     * in reach. Falls back to the aim ring in the screen centre if the hand spot is not set yet.
+     */
+    private boolean itemReachable(Bitmap b) {
+        int w = b.getWidth(), h = b.getHeight();
+        if (isSet("E")) {
+            float hx = w * prefs.getInt("kx_E", 0) / 1000f;
+            float hy = h * prefs.getInt("ky_E", 0) / 1000f;
+            float half = h * 0.05f;
+            int n = 0, bright = 0;
+            for (int iy = -4; iy <= 4; iy++) {
+                for (int ix = -4; ix <= 4; ix++) {
+                    int x = Math.max(0, Math.min(w - 1, Math.round(hx + ix * half / 4f)));
+                    int y = Math.max(0, Math.min(h - 1, Math.round(hy + iy * half / 4f)));
+                    int px = b.getPixel(x, y);
+                    int lum = (Color.red(px) * 299 + Color.green(px) * 587 + Color.blue(px) * 114) / 1000;
+                    if (lum > 215) bright++;
+                    n++;
+                }
+            }
+            return bright / (float) n >= 0.30f;
+        }
+        return ringRatio(b) >= 0.65f;
     }
 
     /** Fraction (0..1) of points on the game's aim ring (centre of screen) that are bright white. */
     private float ringRatio(Bitmap b) {
         int w = b.getWidth(), h = b.getHeight();
         float cx0 = w / 2f, cy0 = h / 2f;
-        float r = h * 0.020f;
         int tol = Math.max(2, Math.round(h * 0.004f));
-        int n = 24, hit = 0;
-        for (int i = 0; i < n; i++) {
-            double a = 2 * Math.PI * i / n;
-            boolean bright = false;
-            for (int d = -tol; d <= tol && !bright; d++) {
-                int x = (int) Math.round(cx0 + Math.cos(a) * (r + d));
-                int y = (int) Math.round(cy0 + Math.sin(a) * (r + d));
-                x = Math.max(0, Math.min(w - 1, x));
-                y = Math.max(0, Math.min(h - 1, y));
-                int px = b.getPixel(x, y);
-                int lum = (Color.red(px) * 299 + Color.green(px) * 587 + Color.blue(px) * 114) / 1000;
-                if (lum > 200) bright = true;
+        float best = 0f;
+        for (float rf = 0.016f; rf <= 0.026f; rf += 0.005f) {
+            float r = h * rf;
+            int n = 24, hit = 0;
+            for (int i = 0; i < n; i++) {
+                double a = 2 * Math.PI * i / n;
+                boolean bright = false;
+                for (int d = -tol; d <= tol && !bright; d++) {
+                    int x = (int) Math.round(cx0 + Math.cos(a) * (r + d));
+                    int y = (int) Math.round(cy0 + Math.sin(a) * (r + d));
+                    x = Math.max(0, Math.min(w - 1, x));
+                    y = Math.max(0, Math.min(h - 1, y));
+                    int px = b.getPixel(x, y);
+                    int lum = (Color.red(px) * 299 + Color.green(px) * 587 + Color.blue(px) * 114) / 1000;
+                    if (lum > 200) bright = true;
+                }
+                if (bright) hit++;
             }
-            if (bright) hit++;
+            best = Math.max(best, hit / (float) n);
         }
-        return hit / (float) n;
+        return best;
+    }
+
+    // ---------------------------------------------------------------- touch sound (keyboard click)
+
+    private View touchWatch;
+    private final AudioTrack[] clicks = new AudioTrack[4];
+    private int clickIdx = 0;
+    private long lastClick = 0;
+
+    private short[] genClick(int style, int variant) {
+        int sr = 44100;
+        int n = (int) (sr * 0.09);
+        short[] out = new short[n];
+        double f = 1 + (variant - 1.5) * 0.06;
+        java.util.Random rnd = new java.util.Random(7 + variant);
+        double lp = 0;
+        for (int i = 0; i < n; i++) {
+            double t = i / (double) sr;
+            double noise = rnd.nextDouble() * 2 - 1;
+            double v;
+            if (style == 0) {            // thock: deep, soft
+                lp += 0.25 * (noise - lp);
+                v = 0.55 * lp * Math.exp(-t / 0.004)
+                        + 0.75 * Math.sin(2 * Math.PI * 165 * f * t) * Math.exp(-t / 0.022)
+                        + 0.25 * Math.sin(2 * Math.PI * 1450 * f * t) * Math.exp(-t / 0.006);
+            } else if (style == 1) {     // click: crisp
+                v = 0.5 * noise * Math.exp(-t / 0.0015)
+                        + 0.6 * Math.sin(2 * Math.PI * 2600 * f * t) * Math.exp(-t / 0.004)
+                        + 0.35 * Math.sin(2 * Math.PI * 420 * f * t) * Math.exp(-t / 0.010);
+            } else {                     // soft pop
+                v = 0.7 * Math.sin(2 * Math.PI * 520 * f * t) * Math.exp(-t / 0.016)
+                        + 0.25 * Math.sin(2 * Math.PI * 1040 * f * t) * Math.exp(-t / 0.010);
+            }
+            v *= Math.min(1.0, t / 0.0007);
+            v = Math.max(-1.0, Math.min(1.0, v * 0.9));
+            out[i] = (short) (v * 32767);
+        }
+        return out;
+    }
+
+    private void buildSounds() {
+        int style = prefs.getInt("snd_style", 0);
+        for (int i = 0; i < clicks.length; i++) {
+            try {
+                if (clicks[i] != null) clicks[i].release();
+                short[] data = genClick(style, i);
+                AudioTrack t = new AudioTrack.Builder()
+                        .setAudioAttributes(new AudioAttributes.Builder()
+                                .setUsage(AudioAttributes.USAGE_ASSISTANCE_SONIFICATION)
+                                .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                                .build())
+                        .setAudioFormat(new AudioFormat.Builder()
+                                .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                                .setSampleRate(44100)
+                                .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                                .build())
+                        .setBufferSizeInBytes(data.length * 2)
+                        .setTransferMode(AudioTrack.MODE_STATIC)
+                        .build();
+                t.write(data, 0, data.length);
+                clicks[i] = t;
+            } catch (Throwable ex) {
+                clicks[i] = null;
+            }
+        }
+    }
+
+    private void playClick(boolean force) {
+        if (!force && !prefs.getBoolean("tapsound", false)) return;
+        long now = System.currentTimeMillis();
+        if (now - lastClick < 45) return;
+        lastClick = now;
+        AudioTrack t = clicks[clickIdx++ % clicks.length];
+        if (t == null) return;
+        try {
+            t.setVolume(Math.max(0f, Math.min(1f, prefs.getInt("tapvol", 60) / 100f)));
+            t.stop();
+            t.reloadStaticData();
+            t.play();
+        } catch (Throwable ignored) { }
+    }
+
+    /** A 1-pixel window that is told about every touch that lands anywhere else. */
+    private void applyTapSound() {
+        boolean on = prefs.getBoolean("tapsound", false);
+        if (on && touchWatch == null) {
+            buildSounds();
+            touchWatch = new View(this) {
+                @Override public boolean onTouchEvent(MotionEvent e) {
+                    if (e.getActionMasked() == MotionEvent.ACTION_OUTSIDE) playClick(false);
+                    return false;
+                }
+            };
+            WindowManager.LayoutParams l = new WindowManager.LayoutParams(1, 1,
+                    WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                            | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
+                            | WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH,
+                    PixelFormat.TRANSLUCENT);
+            l.gravity = Gravity.TOP | Gravity.START;
+            try { wm.addView(touchWatch, l); } catch (Throwable t) { touchWatch = null; }
+            playClick(true);
+        } else if (!on && touchWatch != null) {
+            removeView(touchWatch);
+            touchWatch = null;
+            for (int i = 0; i < clicks.length; i++) {
+                if (clicks[i] != null) { clicks[i].release(); clicks[i] = null; }
+            }
+        }
     }
 
     // ---------------------------------------------------------------- cursor
